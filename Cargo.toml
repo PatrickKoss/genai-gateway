@@ -1,0 +1,20 @@
+[package]
+name = "pingora-token-counter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+pingora = { version = "0.3.0", features = ["lb"] }
+pingora-error = "0.3.0"
+bytes = "1.7.1"
+pingora-http = "0.3.0"
+anyhow = "1.0.86"
+prometheus = "0.13.4"
+pingora-core = "0.3.0"
+serde = { version = "1.0.206", features = ["derive"] }
+serde_json = "1.0.124"
+serde_yaml = "0.8.26"
+tiktoken-rs = "0.5.9"
+env_logger = "0.11.5"
+log = "0.4.22"
