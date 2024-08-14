@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use log::info;
 use pingora::prelude::*;
-use prometheus::register_int_counter;
+use prometheus::{register_counter_vec, register_int_counter};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::from_slice;
@@ -25,21 +25,39 @@ fn main() {
                     "prompt_tokens_total",
                     "Number of prompt tokens"
                 )
-                    .expect("Failed to register prompt token counter"),
+                .expect("Failed to register prompt token counter"),
                 completion_token_counter: register_int_counter!(
                     "completion_tokens_total",
                     "Number of completion tokens"
                 )
-                    .expect("Failed to register completion token counter"),
+                .expect("Failed to register completion token counter"),
                 total_token_counter: register_int_counter!(
                     "tokens_total",
                     "Number of total tokens"
                 )
-                    .expect("Failed to register total token counter"),
+                .expect("Failed to register total token counter"),
+                prompt_token_by_model_counter: register_counter_vec!(
+                    "prompt_tokens_by_model_total",
+                    "Number of prompt tokens by model",
+                    &["model"]
+                )
+                .expect("Failed to register prompt token by model counter"),
+                completion_token_by_model_counter: register_counter_vec!(
+                    "completion_tokens_by_model_total",
+                    "Number of completion tokens by model",
+                    &["model"]
+                )
+                .expect("Failed to register completion token by model counter"),
+                total_token_by_model_counter: register_counter_vec!(
+                    "tokens_by_model_total",
+                    "Number of total tokens by model",
+                    &["model"]
+                )
+                .expect("Failed to register total token by model counter"),
             },
             down_stream_peer: HttpGateWayDownstreamPeer {
                 tls: false,
-                addr: "0.0.0.0".to_owned(),
+                addr: "0.0.0.0",
                 port: 8081,
             },
         },
@@ -64,7 +82,7 @@ pub struct HttpGateway {
 
 struct HttpGateWayDownstreamPeer {
     tls: bool,
-    addr: String,
+    addr: &'static str,
     port: u16,
 }
 
@@ -72,6 +90,9 @@ struct HttpGateWayMetrics {
     prompt_token_counter: prometheus::IntCounter,
     completion_token_counter: prometheus::IntCounter,
     total_token_counter: prometheus::IntCounter,
+    prompt_token_by_model_counter: prometheus::CounterVec,
+    completion_token_by_model_counter: prometheus::CounterVec,
+    total_token_by_model_counter: prometheus::CounterVec,
 }
 
 pub struct Ctx {
@@ -111,11 +132,11 @@ impl ProxyHttp for HttpGateway {
         _session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let addr = (&*self.down_stream_peer.addr, self.down_stream_peer.port);
+        let addr = (self.down_stream_peer.addr, self.down_stream_peer.port);
         let peer = Box::new(HttpPeer::new(
             addr,
             self.down_stream_peer.tls,
-            self.down_stream_peer.addr.clone(),
+            self.down_stream_peer.addr.to_string(),
         ));
         Ok(peer)
     }
@@ -127,8 +148,8 @@ impl ProxyHttp for HttpGateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()>
-        where
-            Self::CTX: Send + Sync,
+    where
+        Self::CTX: Send + Sync,
     {
         self.fill_openai_request(session, body, end_of_stream, ctx)?;
 
@@ -142,11 +163,17 @@ impl ProxyHttp for HttpGateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<std::time::Duration>>
-        where
-            Self::CTX: Send + Sync,
+    where
+        Self::CTX: Send + Sync,
     {
         let token_response_openai = self.get_openai_response(body, end_of_stream, ctx)?;
         if let Some(tokens) = token_response_openai {
+            let model = if let Some(openai_request) = &ctx.openai_request {
+                &openai_request.model
+            } else {
+                ""
+            };
+
             self.gateway_metrics
                 .completion_token_counter
                 .inc_by(tokens.completion_tokens);
@@ -156,12 +183,27 @@ impl ProxyHttp for HttpGateway {
             self.gateway_metrics
                 .total_token_counter
                 .inc_by(tokens.completion_tokens + tokens.prompt_tokens);
+            self.gateway_metrics
+                .prompt_token_by_model_counter
+                .with_label_values(&[model])
+                .inc_by(tokens.prompt_tokens as f64);
+            self.gateway_metrics
+                .completion_token_by_model_counter
+                .with_label_values(&[model])
+                .inc_by(tokens.completion_tokens as f64);
+            self.gateway_metrics
+                .total_token_by_model_counter
+                .with_label_values(&[model])
+                .inc_by((tokens.completion_tokens + tokens.prompt_tokens) as f64);
         }
 
         Ok(None)
     }
 
-    async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX) where Self::CTX: Send + Sync {
+    async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX)
+    where
+        Self::CTX: Send + Sync,
+    {
         let response_code = session
             .response_written()
             .map_or(0, |resp| resp.status.as_u16());
@@ -181,10 +223,8 @@ impl HttpGateway {
         ctx: &mut Ctx,
     ) -> Result<()> {
         let path = session.req_header().uri.path();
-        let binding = session.req_header().method.clone();
-        let method = binding.as_str();
 
-        if method == "POST" {
+        if session.req_header().method == "POST" {
             match path {
                 p if p.starts_with("/v1/chat/completions") => {
                     self.process_chat_completions(body, end_of_stream, ctx)
@@ -319,20 +359,23 @@ impl HttpGateway {
         end_of_stream: bool,
         ctx: &mut Ctx,
     ) -> Result<Option<TokenResponse>>
-        where
-            Ctx: Send + Sync,
+    where
+        Ctx: Send + Sync,
     {
         if let Some(openai_request) = &ctx.openai_request {
-            let openai_request = openai_request.clone();
-            self.extend_response_buffer(ctx, body);
+            self.extend_response_buffer(&mut ctx.buffer.resp_buffer, body);
 
             if end_of_stream {
                 if openai_request.is_chat_completion_stream_request {
-                    return self.process_chat_completions_response(ctx, &openai_request);
+                    return self.process_chat_completions_response(
+                        &ctx.buffer.resp_buffer,
+                        openai_request,
+                    );
                 } else if openai_request.is_completion_stream_request {
-                    return self.process_completions_response(ctx, &openai_request);
+                    return self
+                        .process_completions_response(&ctx.buffer.resp_buffer, openai_request);
                 } else if openai_request.is_usage_request {
-                    return self.process_usage_response(ctx);
+                    return self.process_usage_response(&ctx.buffer.resp_buffer);
                 }
             }
         }
@@ -340,19 +383,18 @@ impl HttpGateway {
         Ok(None)
     }
 
-    fn extend_response_buffer(&self, ctx: &mut Ctx, body: &Option<Bytes>) {
+    fn extend_response_buffer(&self, resp_buffer: &mut Vec<u8>, body: &Option<Bytes>) {
         if let Some(b) = body {
-            ctx.buffer.resp_buffer.extend(&b[..]);
+            resp_buffer.extend(&b[..]);
         }
     }
 
     fn process_chat_completions_response(
         &self,
-        ctx: &mut Ctx,
+        resp_buffer: &[u8],
         openai_request: &OpenAIRequest,
     ) -> Result<Option<TokenResponse>> {
-        let responses =
-            self.extract_responses::<ChatCompletionStreamingResponse>(&ctx.buffer.resp_buffer)?;
+        let responses = self.extract_responses::<ChatCompletionStreamingResponse>(resp_buffer)?;
         let token_count = self.calculate_token_count_for_chat(&responses);
         Ok(Some(TokenResponse {
             completion_tokens: token_count as u64,
@@ -362,11 +404,10 @@ impl HttpGateway {
 
     fn process_completions_response(
         &self,
-        ctx: &mut Ctx,
+        resp_buffer: &[u8],
         openai_request: &OpenAIRequest,
     ) -> Result<Option<TokenResponse>> {
-        let responses =
-            self.extract_responses::<CompletionStreamingResponse>(&ctx.buffer.resp_buffer)?;
+        let responses = self.extract_responses::<CompletionStreamingResponse>(resp_buffer)?;
         let token_count = self.calculate_token_count_for_completion(&responses);
         Ok(Some(TokenResponse {
             completion_tokens: token_count as u64,
@@ -374,8 +415,8 @@ impl HttpGateway {
         }))
     }
 
-    fn process_usage_response(&self, ctx: &mut Ctx) -> Result<Option<TokenResponse>> {
-        from_slice::<UsageResponse>(&ctx.buffer.resp_buffer)
+    fn process_usage_response(&self, resp_buffer: &[u8]) -> Result<Option<TokenResponse>> {
+        from_slice::<UsageResponse>(resp_buffer)
             .map_err(|_| Error::explain(HTTPStatus(502), "invalid response body"))
             .map(|usage_body| {
                 Some(TokenResponse {
@@ -411,9 +452,7 @@ impl HttpGateway {
             .map(|choice| {
                 let binding = "".to_string();
                 let content = choice.delta.content.as_ref().unwrap_or(&binding);
-                self.tokenizer
-                    .encode_with_special_tokens(content)
-                    .len()
+                self.tokenizer.encode_with_special_tokens(content).len()
             })
             .sum()
     }
