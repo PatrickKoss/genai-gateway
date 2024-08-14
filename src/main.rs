@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use log::info;
 use pingora::prelude::*;
+use pingora_http::ResponseHeader;
 use prometheus::{register_counter_vec, register_int_counter};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -152,6 +153,25 @@ impl ProxyHttp for HttpGateway {
         Self::CTX: Send + Sync,
     {
         self.fill_openai_request(session, body, end_of_stream, ctx)?;
+
+        Ok(())
+    }
+
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        _ctx: &mut Self::CTX,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        if upstream_response.status.as_u16() != 200 {
+            return Err(Error::explain(
+                HTTPStatus(upstream_response.status.as_u16()),
+                "upstream response status is not 200",
+            ));
+        }
 
         Ok(())
     }
