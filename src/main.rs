@@ -1,5 +1,9 @@
+use std::env;
+
+use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use bytes::Bytes;
+use clap::Parser;
 use log::info;
 use pingora::prelude::*;
 use pingora_http::ResponseHeader;
@@ -9,7 +13,42 @@ use serde::Deserialize;
 use serde_json::from_slice;
 use tiktoken_rs::{cl100k_base, CoreBPE};
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value_t = true)]
+    openai_tls: bool,
+    #[arg(short, long, default_value_t = 443)]
+    openai_port: u16,
+    #[arg(short, long, default_value = "0.0.0.0")]
+    openai_domain: String,
+    #[arg(short, long, default_value = "6188")]
+    http_proxy_port: String,
+    #[arg(short, long, default_value = "6192")]
+    http_proxy_metrics_port: String,
+}
+
 fn main() {
+    let args = Args::parse();
+    let openai_tls = env::var("OPENAI_TLS")
+        .unwrap_or_else(|_| args.openai_tls.to_string())
+        .parse::<bool>()
+        .expect("Failed to parse OPENAI_TLS");
+    let openai_port = env::var("OPENAI_PORT")
+        .ok()
+        .unwrap_or(args.openai_port.to_string())
+        .parse::<u16>()
+        .expect("Failed to parse OPENAI_PORT");
+    let openai_domain = env::var("OPENAI_DOMAIN")
+        .ok()
+        .unwrap_or(args.openai_domain.to_string());
+    let http_proxy_port = env::var("HTTP_PROXY_PORT")
+        .ok()
+        .unwrap_or(args.http_proxy_port.to_string());
+    let http_proxy_metrics_port = env::var("HTTP_PROXY_METRICS_PORT")
+        .ok()
+        .unwrap_or(args.http_proxy_metrics_port.to_string());
+
     env_logger::init();
 
     let mut server = Server::new(None).unwrap();
@@ -19,60 +58,31 @@ fn main() {
 
     let mut http_proxy = http_proxy_service(
         &server.configuration,
-        HttpGateway {
+        HttpGateway::new(HttpGatewayConfig {
+            openai_tls,
+            openai_port,
+            openai_domain: openai_domain.leak(),
             tokenizer,
-            gateway_metrics: HttpGateWayMetrics {
-                prompt_token_counter: register_int_counter!(
-                    "prompt_tokens_total",
-                    "Number of prompt tokens"
-                )
-                .expect("Failed to register prompt token counter"),
-                completion_token_counter: register_int_counter!(
-                    "completion_tokens_total",
-                    "Number of completion tokens"
-                )
-                .expect("Failed to register completion token counter"),
-                total_token_counter: register_int_counter!(
-                    "tokens_total",
-                    "Number of total tokens"
-                )
-                .expect("Failed to register total token counter"),
-                prompt_token_by_model_counter: register_counter_vec!(
-                    "prompt_tokens_by_model_total",
-                    "Number of prompt tokens by model",
-                    &["model"]
-                )
-                .expect("Failed to register prompt token by model counter"),
-                completion_token_by_model_counter: register_counter_vec!(
-                    "completion_tokens_by_model_total",
-                    "Number of completion tokens by model",
-                    &["model"]
-                )
-                .expect("Failed to register completion token by model counter"),
-                total_token_by_model_counter: register_counter_vec!(
-                    "tokens_by_model_total",
-                    "Number of total tokens by model",
-                    &["model"]
-                )
-                .expect("Failed to register total token by model counter"),
-            },
-            down_stream_peer: HttpGateWayDownstreamPeer {
-                tls: false,
-                addr: "0.0.0.0",
-                port: 8081,
-            },
-        },
+        })
+        .expect("Failed to create http gateway"),
     );
 
-    http_proxy.add_tcp("0.0.0.0:6188");
+    http_proxy.add_tcp(format!("0.0.0.0:{}", http_proxy_port).as_str());
     server.add_service(http_proxy);
 
     let mut prometheus_service_http =
         pingora_core::services::listening::Service::prometheus_http_service();
-    prometheus_service_http.add_tcp("127.0.0.1:6192");
+    prometheus_service_http.add_tcp(format!("0.0.0.0:{}", http_proxy_metrics_port).as_str());
     server.add_service(prometheus_service_http);
 
     server.run_forever();
+}
+
+pub struct HttpGatewayConfig {
+    openai_tls: bool,
+    openai_port: u16,
+    openai_domain: &'static str,
+    tokenizer: CoreBPE,
 }
 
 pub struct HttpGateway {
@@ -234,7 +244,95 @@ impl ProxyHttp for HttpGateway {
     }
 }
 
+impl Default for HttpGateway {
+    fn default() -> Self {
+        Self {
+            tokenizer: cl100k_base().expect("Failed to load tokenizer"),
+            gateway_metrics: HttpGateWayMetrics {
+                prompt_token_counter: register_int_counter!(
+                    "prompt_tokens_total",
+                    "Number of prompt tokens"
+                )
+                .expect("Failed to register prompt token counter"),
+                completion_token_counter: register_int_counter!(
+                    "completion_tokens_total",
+                    "Number of completion tokens"
+                )
+                .expect("Failed to register completion token counter"),
+                total_token_counter: register_int_counter!(
+                    "tokens_total",
+                    "Number of total tokens"
+                )
+                .expect("Failed to register total token counter"),
+                prompt_token_by_model_counter: register_counter_vec!(
+                    "prompt_tokens_by_model_total",
+                    "Number of prompt tokens by model",
+                    &["model"]
+                )
+                .expect("Failed to register prompt token by model counter"),
+                completion_token_by_model_counter: register_counter_vec!(
+                    "completion_tokens_by_model_total",
+                    "Number of completion tokens by model",
+                    &["model"]
+                )
+                .expect("Failed to register completion token by model counter"),
+                total_token_by_model_counter: register_counter_vec!(
+                    "tokens_by_model_total",
+                    "Number of total tokens by model",
+                    &["model"]
+                )
+                .expect("Failed to register total token by model counter"),
+            },
+            down_stream_peer: HttpGateWayDownstreamPeer {
+                tls: true,
+                addr: "0.0.0.0",
+                port: 443,
+            },
+        }
+    }
+}
+
 impl HttpGateway {
+    pub fn new(http_gateway_config: HttpGatewayConfig) -> AnyResult<Self> {
+        Ok(Self {
+            tokenizer: http_gateway_config.tokenizer,
+            gateway_metrics: HttpGateWayMetrics {
+                prompt_token_counter: register_int_counter!(
+                    "prompt_tokens_total",
+                    "Number of prompt tokens"
+                )?,
+                completion_token_counter: register_int_counter!(
+                    "completion_tokens_total",
+                    "Number of completion tokens"
+                )?,
+                total_token_counter: register_int_counter!(
+                    "tokens_total",
+                    "Number of total tokens"
+                )?,
+                prompt_token_by_model_counter: register_counter_vec!(
+                    "prompt_tokens_by_model_total",
+                    "Number of prompt tokens by model",
+                    &["model"]
+                )?,
+                completion_token_by_model_counter: register_counter_vec!(
+                    "completion_tokens_by_model_total",
+                    "Number of completion tokens by model",
+                    &["model"]
+                )?,
+                total_token_by_model_counter: register_counter_vec!(
+                    "tokens_by_model_total",
+                    "Number of total tokens by model",
+                    &["model"]
+                )?,
+            },
+            down_stream_peer: HttpGateWayDownstreamPeer {
+                tls: http_gateway_config.openai_tls,
+                addr: http_gateway_config.openai_domain,
+                port: http_gateway_config.openai_port,
+            },
+        })
+    }
+
     fn fill_openai_request(
         &self,
         session: &mut Session,
