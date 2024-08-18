@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -11,7 +13,6 @@ use prometheus::{register_counter_vec, register_int_counter, CounterVec, IntCoun
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::from_slice;
-use std::sync::OnceLock;
 use tiktoken_rs::{cl100k_base, CoreBPE};
 
 pub struct HttpGatewayConfig {
@@ -160,19 +161,6 @@ impl ProxyHttp for HttpGateway {
         Ok(peer)
     }
 
-    async fn upstream_request_filter(
-        &self,
-        _session: &mut Session,
-        upstream_request: &mut RequestHeader,
-        _ctx: &mut Self::CTX,
-    ) -> pingora_error::Result<()>
-    where
-        Self::CTX: Send + Sync,
-    {
-        upstream_request.insert_header("Host", self.down_stream_peer.addr)?;
-        Ok(())
-    }
-
     async fn request_body_filter(
         &self,
         session: &mut Session,
@@ -185,6 +173,19 @@ impl ProxyHttp for HttpGateway {
     {
         self.fill_openai_request(session, body, end_of_stream, ctx)?;
 
+        Ok(())
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        _ctx: &mut Self::CTX,
+    ) -> pingora_error::Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        upstream_request.insert_header("Host", self.down_stream_peer.addr)?;
         Ok(())
     }
 
@@ -665,6 +666,409 @@ mod tests {
             .expect("Failed to send request");
 
         assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn test_post_completion_invalid_response_body() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/v1/completions");
+                then.status(200).json_body(
+                    r#"
+                    {
+                    "invalid: "json",
+                    }
+                "#,
+                );
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/completions", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "prompt": "test"}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn test_post_completion_invalid_request_body() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/v1/completions");
+                then.status(200).json_body(json!(
+                    {
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 10,
+                        },
+                    }
+                ));
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/completions", http_proxy_server_port).as_str())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_post_completion() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/v1/completions");
+                then.status(200).json_body(json!(
+                    {
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 10,
+                        },
+                    }
+                ));
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/completions", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "prompt": "test"}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = res.bytes().await.expect("Failed to read response body");
+        let json: Value = serde_json::from_slice(&bytes).expect("Failed to parse JSON");
+
+        assert!(json.get("usage").is_some());
+        let data = json.get("usage").unwrap().as_object().unwrap();
+        assert_eq!(data.get("prompt_tokens").unwrap().as_i64(), Some(20i64));
+        assert_eq!(data.get("completion_tokens").unwrap().as_i64(), Some(10i64));
+    }
+
+    #[tokio::test]
+    async fn test_post_completion_stream() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/v1/completions");
+                then.status(200).json_body(
+                    r#"
+
+                data: {"choices": [{"text": "test"}]}
+
+                data: {"choices": [{"text": "test"}]}
+
+                data: {"choices": [{"text": "test"}]}
+
+                data: [DONE]
+                "#,
+                );
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/completions", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "prompt": "test", "stream": true}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_post_completion_stream_wrong_response_body() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/v1/completions");
+                then.status(200).json_body(
+                    r#"
+                data: {"choices: [{text": test"}]}
+
+                data: {"choices: {"text": "test"}]}
+
+                data: [DONE]
+                "#,
+                );
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/completions", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "prompt": "test", "stream": true}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_post_chat_completion_invalid_response_body() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/v1/chat/completions");
+                then.status(200).json_body(
+                    r#"
+                    {
+                    "invalid: "json",
+                    }
+                "#,
+                );
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/chat/completions", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "messages": [{"role": "system", "content":"what are the best football players all time?"}]}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn test_post_chat_completion_invalid_request_body() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/v1/chat/completions");
+                then.status(200).json_body(json!(
+                    {
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 10,
+                        },
+                    }
+                ));
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(
+                format!(
+                    "http://127.0.0.1:{}/v1/chat/completions",
+                    http_proxy_server_port
+                )
+                .as_str(),
+            )
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_post_chat_completion() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/v1/chat/completions");
+                then.status(200).json_body(json!(
+                    {
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 10,
+                        },
+                    }
+                ));
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/chat/completions", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "messages": [{"role": "system", "content":"what are the best football players all time?"}]}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = res.bytes().await.expect("Failed to read response body");
+        let json: Value = serde_json::from_slice(&bytes).expect("Failed to parse JSON");
+
+        assert!(json.get("usage").is_some());
+        let data = json.get("usage").unwrap().as_object().unwrap();
+        assert_eq!(data.get("prompt_tokens").unwrap().as_i64(), Some(20i64));
+        assert_eq!(data.get("completion_tokens").unwrap().as_i64(), Some(10i64));
+    }
+
+    #[tokio::test]
+    async fn test_post_chat_completion_stream() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/v1/chat/completions");
+                then.status(200).json_body(
+                    r#"
+
+                data: {"choices": [{"delta": {"content": "test"}}]}
+
+                data: {"choices": [{"delta": {"content": "test"}}]}
+
+                data: {"choices": [{"delta": {"content": "test"}}]}
+
+                data: [DONE]
+                "#,
+                );
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/chat/completions", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "messages": [{"role": "system", "content":"what are the best football players all time?"}], "stream": true}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_post_chat_completion_stream_wrong_response_body() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST)
+                    .path("/v1/chat/completions");
+                then.status(200).json_body(
+                    r#"
+                data: {"choices: [{"delta": {"content": "test"}}]}
+
+                data: [DONE]
+                "#,
+                );
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/chat/completions", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "messages": [{"role": "system", "content":"what are the best football players all time?"}], "stream": true}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    // TODO
+
+    #[tokio::test]
+    async fn test_post_embeddings_invalid_response_body() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/v1/embeddings");
+                then.status(200).json_body(
+                    r#"
+                    {
+                    "invalid: "json",
+                    }
+                "#,
+                );
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/embeddings", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "input": "test"}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn test_post_embeddings_invalid_request_body() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/v1/embeddings");
+                then.status(200).json_body(json!(
+                    {
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 10,
+                        },
+                    }
+                ));
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/embeddings", http_proxy_server_port).as_str())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_post_embeddings() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/v1/embeddings");
+                then.status(200).json_body(json!(
+                    {
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 10,
+                        },
+                    }
+                ));
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/embeddings", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "input": "test"}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = res.bytes().await.expect("Failed to read response body");
+        let json: Value = serde_json::from_slice(&bytes).expect("Failed to parse JSON");
+
+        assert!(json.get("usage").is_some());
+        let data = json.get("usage").unwrap().as_object().unwrap();
+        assert_eq!(data.get("prompt_tokens").unwrap().as_i64(), Some(20i64));
+        assert_eq!(data.get("completion_tokens").unwrap().as_i64(), Some(10i64));
     }
 
     async fn start_http_proxy_server(upstream_port: u16) -> u16 {

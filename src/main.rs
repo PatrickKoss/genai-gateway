@@ -23,6 +23,7 @@ struct Args {
     http_proxy_metrics_port: String,
 }
 
+#[cfg(not(tarpaulin_include))]
 fn main() {
     let args = Args::parse();
     let openai_tls = env::var("OPENAI_TLS")
