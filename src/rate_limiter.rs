@@ -31,7 +31,6 @@ pub(crate) struct RedisSlidingWindowRateLimiter {
     connection_pool: Pool<RedisConnectionManager>,
 }
 
-
 #[async_trait]
 impl SlidingWindowRateLimiter for RedisSlidingWindowRateLimiter {
     async fn record_sliding_window(
@@ -60,7 +59,9 @@ impl SlidingWindowRateLimiter for RedisSlidingWindowRateLimiter {
 
         let previous_count: Option<u64> = connection.get(&previous_key).await?;
         let current_count: Option<u64> = connection.incr(&current_key, tokens).await?;
-        connection.expire::<_, i64>(&current_key, (size_secs * 2) as i64).await?;
+        connection
+            .expire::<_, i64>(&current_key, (size_secs * 2) as i64)
+            .await?;
 
         Ok(Self::sliding_window_count(
             previous_count,
@@ -133,8 +134,8 @@ mod tests {
     use redis::Client;
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
-        GenericImage,
-        ImageExt, runners::AsyncRunner,
+        runners::AsyncRunner,
+        GenericImage, ImageExt,
     };
 
     use crate::rate_limiter::{RedisSlidingWindowRateLimiter, SlidingWindowRateLimiter};

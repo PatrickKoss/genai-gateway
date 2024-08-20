@@ -6,8 +6,8 @@ use pingora::prelude::*;
 use redis::Client;
 use tiktoken_rs::cl100k_base;
 
-use http_proxy::{HttpGateway, HttpGatewayConfig};
 use crate::redis_async_pool::RedisConnectionManager;
+use http_proxy::{HttpGateway, HttpGatewayConfig};
 
 mod http_proxy;
 mod rate_limiter;

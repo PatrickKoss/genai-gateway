@@ -1,8 +1,8 @@
+use std::borrow::Cow;
 use std::{
     ops::{Deref, DerefMut},
     time::{Duration, Instant},
 };
-use std::borrow::Cow;
 
 use deadpool::managed::{Manager, Metrics, RecycleError, RecycleResult};
 use rand::Rng;
@@ -46,8 +46,8 @@ impl Manager for RedisConnectionManager {
                         Instant::now()
                             + *min
                             + Duration::from_secs_f64(
-                            rand::thread_rng().gen_range(0.0, fuzz.as_secs_f64()),
-                        )
+                                rand::thread_rng().gen_range(0.0, fuzz.as_secs_f64()),
+                            )
                     }
                     // already expired ;)
                     Ttl::Once => Instant::now(),
@@ -55,7 +55,11 @@ impl Manager for RedisConnectionManager {
         })
     }
 
-    async fn recycle(&self, conn: &mut Self::Type, _metrics: &Metrics) -> RecycleResult<Self::Error> {
+    async fn recycle(
+        &self,
+        conn: &mut Self::Type,
+        _metrics: &Metrics,
+    ) -> RecycleResult<Self::Error> {
         if self.check_on_recycle {
             let _r: bool = conn.exists(b"key").await?;
         }
