@@ -7,6 +7,7 @@ use tiktoken_rs::cl100k_base;
 use http_proxy::{HttpGateway, HttpGatewayConfig};
 
 mod http_proxy;
+mod rate_limiter;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

@@ -19,9 +19,12 @@ tiktoken-rs = "0.5.9"
 env_logger = "0.11.5"
 log = "0.4.22"
 clap = { version = "4.5.15", features = ["derive"] }
+redis = { version = "0.26.1", features = ["async-std-comp"] }
+time = "0.3.36"
 
 [dev-dependencies]
 matchers = "0.2.0"
 reqwest = "0.12.5"
 tokio = "1.39.2"
 httpmock = "0.7.0"
+testcontainers = "0.21.1"

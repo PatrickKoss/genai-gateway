@@ -1,0 +1,6 @@
+services:
+  redis:
+    container_name: redis
+    image: redis:7.2.4
+    ports:
+      - '6380:6379'
