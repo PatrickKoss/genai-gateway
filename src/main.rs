@@ -6,8 +6,10 @@ use pingora::prelude::*;
 use redis::Client;
 use tiktoken_rs::cl100k_base;
 
-use crate::redis_async_pool::RedisConnectionManager;
+use crate::rate_limiter::SlidingWindowRateLimiterEnum;
 use http_proxy::{HttpGateway, HttpGatewayConfig};
+
+use crate::redis_async_pool::RedisConnectionManager;
 
 mod http_proxy;
 mod rate_limiter;
@@ -26,6 +28,12 @@ struct Args {
     http_proxy_port: String,
     #[arg(long, default_value = "6192")]
     http_proxy_metrics_port: String,
+    #[arg(long, default_value_t = false)]
+    enable_rate_limiting: bool,
+    #[arg(long, default_value = "redis://127.0.0.1:6379/0")]
+    rate_limiting_redis_connection_string: String,
+    #[arg(long, default_value_t = 5)]
+    rate_limiting_redis_pool_size: usize,
 }
 
 fn main() {
@@ -48,6 +56,18 @@ fn main() {
     let http_proxy_metrics_port = env::var("HTTP_PROXY_METRICS_PORT")
         .ok()
         .unwrap_or(args.http_proxy_metrics_port.to_string());
+    let enable_rate_limiting = env::var("ENABLE_RATE_LIMITING")
+        .unwrap_or_else(|_| args.enable_rate_limiting.to_string())
+        .parse::<bool>()
+        .expect("Failed to parse ENABLE_RATE_LIMITING");
+    let rate_limiting_redis_connection_string = env::var("RATE_LIMITING_REDIS_CONNECTION_STRING")
+        .ok()
+        .unwrap_or(args.rate_limiting_redis_connection_string.to_string());
+    let rate_limiting_redis_pool_size = env::var("RATE_LIMITING_REDIS_POOL_SIZE")
+        .ok()
+        .unwrap_or(args.rate_limiting_redis_pool_size.to_string())
+        .parse::<usize>()
+        .expect("Failed to parse RATE_LIMITING_REDIS_POOL_SIZE");
 
     env_logger::init();
 
@@ -56,19 +76,23 @@ fn main() {
 
     let tokenizer = cl100k_base().expect("Failed to load tokenizer");
 
-    // init redis connection
-    let redis_url = format!("redis://127.0.0.1:{}/0", 6739);
-    let client = Client::open(redis_url).expect("Failed to create Redis client");
+    let rate_limiter = if enable_rate_limiting {
+        let client = Client::open(rate_limiting_redis_connection_string)
+            .expect("Failed to create Redis client");
 
-    let pool_config = PoolConfig::default();
-    let connection_pool = Pool::builder(RedisConnectionManager::new(client, true, None))
-        .config(pool_config)
-        .max_size(5)
-        .build()
-        .expect("Failed to create Redis pool");
+        let pool_config = PoolConfig::default();
+        let connection_pool = Pool::builder(RedisConnectionManager::new(client, true, None))
+            .config(pool_config)
+            .max_size(rate_limiting_redis_pool_size)
+            .build()
+            .expect("Failed to create Redis pool");
 
-    // init rate limiter
-    let rate_limiter = rate_limiter::RedisSlidingWindowRateLimiter::new(connection_pool);
+        SlidingWindowRateLimiterEnum::Redis(rate_limiter::RedisSlidingWindowRateLimiter::new(
+            connection_pool,
+        ))
+    } else {
+        SlidingWindowRateLimiterEnum::Dummy(rate_limiter::DummySlidingWindowRateLimiter {})
+    };
 
     let mut http_proxy = http_proxy_service(
         &server.configuration,
