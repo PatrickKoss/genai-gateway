@@ -1,20 +1,36 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use redis::AsyncCommands;
+use async_trait::async_trait;
+use redis::{AsyncCommands, Commands};
 
 const KEY_PREFIX: &str = "rate_limiter";
 
-struct RateLimiter {
+#[async_trait]
+pub trait SlidingWindowRateLimiter {
+    async fn record_sliding_window(
+        &mut self,
+        resource: &str,
+        subject: &str,
+        tokens: u64,
+        size: Duration,
+    ) -> Result<u64>;
+
+    async fn fetch_sliding_window(
+        &mut self,
+        resource: &str,
+        subject: &str,
+        size: Duration,
+    ) -> Result<u64>;
+}
+
+struct RedisSlidingWindowRateLimiter {
     connection: redis::aio::MultiplexedConnection,
 }
 
-impl RateLimiter {
-    pub fn new(connection: redis::aio::MultiplexedConnection) -> Self {
-        RateLimiter { connection }
-    }
-
-    pub async fn record_sliding_window(
+#[async_trait]
+impl SlidingWindowRateLimiter for RedisSlidingWindowRateLimiter {
+    async fn record_sliding_window(
         &mut self,
         resource: &str,
         subject: &str,
@@ -52,20 +68,7 @@ impl RateLimiter {
         ))
     }
 
-    pub fn sliding_window_count(
-        previous: Option<u64>,
-        current: Option<u64>,
-        now: Duration,
-        size: Duration,
-    ) -> u64 {
-        let current_window = (now.as_secs() / size.as_secs()) * size.as_secs();
-        let next_window = current_window + size.as_secs();
-        let weight = (Duration::from_secs(next_window).as_millis() - now.as_millis()) as f64
-            / size.as_millis() as f64;
-        current.unwrap_or(0) + (previous.unwrap_or(0) as f64 * weight).round() as u64
-    }
-
-    pub async fn fetch_sliding_window(
+    async fn fetch_sliding_window(
         &mut self,
         resource: &str,
         subject: &str,
@@ -98,6 +101,25 @@ impl RateLimiter {
     }
 }
 
+impl RedisSlidingWindowRateLimiter {
+    pub fn new(connection: redis::aio::MultiplexedConnection) -> Self {
+        RedisSlidingWindowRateLimiter { connection }
+    }
+
+    pub fn sliding_window_count(
+        previous: Option<u64>,
+        current: Option<u64>,
+        now: Duration,
+        size: Duration,
+    ) -> u64 {
+        let current_window = (now.as_secs() / size.as_secs()) * size.as_secs();
+        let next_window = current_window + size.as_secs();
+        let weight = (Duration::from_secs(next_window).as_millis() - now.as_millis()) as f64
+            / size.as_millis() as f64;
+        current.unwrap_or(0) + (previous.unwrap_or(0) as f64 * weight).round() as u64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
@@ -110,7 +132,7 @@ mod tests {
         GenericImage, ImageExt,
     };
 
-    use crate::rate_limiter::RateLimiter;
+    use crate::rate_limiter::{RedisSlidingWindowRateLimiter, SlidingWindowRateLimiter};
 
     #[tokio::test]
     async fn test_ratelimiting() {
@@ -135,7 +157,7 @@ mod tests {
             .expect("Failed to connect to Redis");
 
         // init rate limiter
-        let mut rate_limiter = RateLimiter::new(connection);
+        let mut rate_limiter = RedisSlidingWindowRateLimiter::new(connection);
 
         // record value
         rate_limiter
