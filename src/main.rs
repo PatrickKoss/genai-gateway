@@ -1,3 +1,5 @@
+#![feature(duration_constructors)]
+
 use std::env;
 
 use clap::Parser;

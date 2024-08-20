@@ -1,4 +1,5 @@
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
@@ -190,6 +191,18 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         Self::CTX: Send + Sync,
     {
         upstream_request.insert_header("Host", self.down_stream_peer.addr)?;
+
+        // TODO add config for how many tokens to rate limit and get subject from header
+        // TODO move this part to the openai stuff in the other implementation since it is specific to that
+        let count = self
+            .sliding_window_rate_limiter
+            .fetch_sliding_window("user", "test", Duration::from_hours(1))
+            .await
+            .map_err(|e| Error::explain(HTTPStatus(502), e.to_string()))?;
+        if count > 100 {
+            return Err(Error::explain(HTTPStatus(429), "rate limit exceeded"));
+        }
+
         Ok(())
     }
 
@@ -218,7 +231,7 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
         ctx: &mut Self::CTX,
-    ) -> pingora_error::Result<Option<std::time::Duration>>
+    ) -> pingora_error::Result<Option<Duration>>
     where
         Self::CTX: Send + Sync,
     {
@@ -251,6 +264,15 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
                 .total_token_by_model_counter
                 .with_label_values(&[model])
                 .inc_by((tokens.completion_tokens + tokens.prompt_tokens) as f64);
+
+            // we willingly ignore the future here since the method can´t be async
+            // TODO add config for window size
+            let _ = self.sliding_window_rate_limiter.record_sliding_window(
+                "user",
+                "test",
+                tokens.completion_tokens + tokens.prompt_tokens,
+                Duration::from_hours(1),
+            );
         }
 
         Ok(None)
@@ -996,8 +1018,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
     }
 
-    // TODO
-
     #[tokio::test]
     async fn test_post_embeddings_invalid_response_body() {
         let mock_server = MockServer::start();
@@ -1088,14 +1108,55 @@ mod tests {
         assert_eq!(data.get("completion_tokens").unwrap().as_i64(), Some(10i64));
     }
 
-    async fn start_http_proxy_server(upstream_port: u16) -> u16 {
+    #[tokio::test]
+    async fn test_post_embeddings_rate_limited() {
+        let mut mock_sliding_window_rate_limiter = MockSlidingWindowRateLimiterImpl::new();
+        mock_sliding_window_rate_limiter
+            .expect_record_sliding_window()
+            .times(1)
+            .returning(|_, _, _, _| Ok(0));
+        // TODO adjust the test for dynamic rate limiting tokens
+        mock_sliding_window_rate_limiter
+            .expect_fetch_sliding_window()
+            .times(1)
+            .returning(|_, _, _| Ok(101));
+
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/v1/embeddings");
+                then.status(200).json_body(json!(
+                    {
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 10,
+                        },
+                    }
+                ));
+            })
+            .await;
+
+        let http_proxy_server_port =
+            start_http_proxy_with_mock(mock_server.port(), mock_sliding_window_rate_limiter).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/embeddings", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "input": "test"}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    async fn start_http_proxy_with_mock(
+        upstream_port: u16,
+        mock_sliding_window_rate_limiter: MockSlidingWindowRateLimiterImpl,
+    ) -> u16 {
         let mut server = pingora_core::prelude::Server::new(None).unwrap();
         server.bootstrap();
 
         let tokenizer = cl100k_base().expect("Failed to load tokenizer");
         let free_port = find_free_port();
-
-        let mock_sliding_window_rate_limiter = MockSlidingWindowRateLimiterImpl::new();
 
         let mut http_proxy = http_proxy_service(
             &server.configuration,
@@ -1118,6 +1179,20 @@ mod tests {
         time::sleep(time::Duration::from_millis(100)).await;
 
         free_port
+    }
+
+    async fn start_http_proxy_server(upstream_port: u16) -> u16 {
+        let mut mock_sliding_window_rate_limiter = MockSlidingWindowRateLimiterImpl::new();
+        mock_sliding_window_rate_limiter
+            .expect_record_sliding_window()
+            .times(1)
+            .returning(|_, _, _, _| Ok(0));
+        mock_sliding_window_rate_limiter
+            .expect_fetch_sliding_window()
+            .times(1)
+            .returning(|_, _, _| Ok(0));
+
+        start_http_proxy_with_mock(upstream_port, mock_sliding_window_rate_limiter).await
     }
 
     fn find_free_port() -> u16 {
