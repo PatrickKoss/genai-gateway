@@ -2,14 +2,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use redis::{AsyncCommands, Commands};
+use deadpool::managed::Pool;
+use redis::AsyncCommands;
+
+use crate::redis_async_pool::RedisConnectionManager;
 
 const KEY_PREFIX: &str = "rate_limiter";
 
 #[async_trait]
 pub trait SlidingWindowRateLimiter {
     async fn record_sliding_window(
-        &mut self,
+        &self,
         resource: &str,
         subject: &str,
         tokens: u64,
@@ -17,21 +20,22 @@ pub trait SlidingWindowRateLimiter {
     ) -> Result<u64>;
 
     async fn fetch_sliding_window(
-        &mut self,
+        &self,
         resource: &str,
         subject: &str,
         size: Duration,
     ) -> Result<u64>;
 }
 
-struct RedisSlidingWindowRateLimiter {
-    connection: redis::aio::MultiplexedConnection,
+pub(crate) struct RedisSlidingWindowRateLimiter {
+    connection_pool: Pool<RedisConnectionManager>,
 }
+
 
 #[async_trait]
 impl SlidingWindowRateLimiter for RedisSlidingWindowRateLimiter {
     async fn record_sliding_window(
-        &mut self,
+        &self,
         resource: &str,
         subject: &str,
         tokens: u64,
@@ -52,14 +56,12 @@ impl SlidingWindowRateLimiter for RedisSlidingWindowRateLimiter {
             KEY_PREFIX, resource, subject, previous_window
         );
 
-        let (previous_count, current_count): (Option<u64>, Option<u64>) = redis::pipe()
-            .atomic()
-            .get(&previous_key)
-            .incr(&current_key, tokens)
-            .expire(&current_key, (size_secs * 2) as i64)
-            .ignore()
-            .query_async(&mut self.connection)
-            .await?;
+        let mut connection = self.connection_pool.get().await?;
+
+        let previous_count: Option<u64> = connection.get(&previous_key).await?;
+        let current_count: Option<u64> = connection.incr(&current_key, tokens).await?;
+        connection.expire::<_, i64>(&current_key, (size_secs * 2) as i64).await?;
+
         Ok(Self::sliding_window_count(
             previous_count,
             current_count,
@@ -69,7 +71,7 @@ impl SlidingWindowRateLimiter for RedisSlidingWindowRateLimiter {
     }
 
     async fn fetch_sliding_window(
-        &mut self,
+        &self,
         resource: &str,
         subject: &str,
         size: Duration,
@@ -89,8 +91,10 @@ impl SlidingWindowRateLimiter for RedisSlidingWindowRateLimiter {
             KEY_PREFIX, resource, subject, previous_window
         );
 
+        let mut connection = self.connection_pool.get().await?;
+
         let (previous_count, current_count): (Option<u64>, Option<u64>) =
-            self.connection.get(vec![previous_key, current_key]).await?;
+            connection.get(vec![previous_key, current_key]).await?;
 
         Ok(Self::sliding_window_count(
             previous_count,
@@ -102,8 +106,8 @@ impl SlidingWindowRateLimiter for RedisSlidingWindowRateLimiter {
 }
 
 impl RedisSlidingWindowRateLimiter {
-    pub fn new(connection: redis::aio::MultiplexedConnection) -> Self {
-        RedisSlidingWindowRateLimiter { connection }
+    pub fn new(connection_pool: Pool<RedisConnectionManager>) -> Self {
+        RedisSlidingWindowRateLimiter { connection_pool }
     }
 
     pub fn sliding_window_count(
@@ -125,14 +129,16 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
     use std::time::Duration;
 
+    use deadpool::managed::{Pool, PoolConfig};
     use redis::Client;
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
-        runners::AsyncRunner,
-        GenericImage, ImageExt,
+        GenericImage,
+        ImageExt, runners::AsyncRunner,
     };
 
     use crate::rate_limiter::{RedisSlidingWindowRateLimiter, SlidingWindowRateLimiter};
+    use crate::redis_async_pool::RedisConnectionManager;
 
     #[tokio::test]
     async fn test_ratelimiting() {
@@ -151,13 +157,16 @@ mod tests {
         // init redis connection
         let redis_url = format!("redis://127.0.0.1:{}/0", free_port);
         let client = Client::open(redis_url).expect("Failed to create Redis client");
-        let connection = client
-            .get_multiplexed_async_std_connection()
-            .await
-            .expect("Failed to connect to Redis");
+
+        let pool_config = PoolConfig::default();
+        let connection_pool = Pool::builder(RedisConnectionManager::new(client, true, None))
+            .config(pool_config)
+            .max_size(5)
+            .build()
+            .expect("Failed to create Redis pool");
 
         // init rate limiter
-        let mut rate_limiter = RedisSlidingWindowRateLimiter::new(connection);
+        let rate_limiter = RedisSlidingWindowRateLimiter::new(connection_pool);
 
         // record value
         rate_limiter

@@ -1,13 +1,17 @@
 use std::env;
 
 use clap::Parser;
+use deadpool::managed::{Pool, PoolConfig};
 use pingora::prelude::*;
+use redis::Client;
 use tiktoken_rs::cl100k_base;
 
 use http_proxy::{HttpGateway, HttpGatewayConfig};
+use crate::redis_async_pool::RedisConnectionManager;
 
 mod http_proxy;
 mod rate_limiter;
+mod redis_async_pool;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -24,7 +28,6 @@ struct Args {
     http_proxy_metrics_port: String,
 }
 
-#[cfg(not(tarpaulin_include))]
 fn main() {
     let args = Args::parse();
     let openai_tls = env::var("OPENAI_TLS")
@@ -53,6 +56,20 @@ fn main() {
 
     let tokenizer = cl100k_base().expect("Failed to load tokenizer");
 
+    // init redis connection
+    let redis_url = format!("redis://127.0.0.1:{}/0", 6739);
+    let client = Client::open(redis_url).expect("Failed to create Redis client");
+
+    let pool_config = PoolConfig::default();
+    let connection_pool = Pool::builder(RedisConnectionManager::new(client, true, None))
+        .config(pool_config)
+        .max_size(5)
+        .build()
+        .expect("Failed to create Redis pool");
+
+    // init rate limiter
+    let rate_limiter = rate_limiter::RedisSlidingWindowRateLimiter::new(connection_pool);
+
     let mut http_proxy = http_proxy_service(
         &server.configuration,
         HttpGateway::new(HttpGatewayConfig {
@@ -60,6 +77,7 @@ fn main() {
             openai_port,
             openai_domain: openai_domain.leak(),
             tokenizer,
+            sliding_window_rate_limiter: rate_limiter,
         })
         .expect("Failed to create http gateway"),
     );

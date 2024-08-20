@@ -9,23 +9,27 @@ use pingora_core::prelude::HttpPeer;
 use pingora_error::Error;
 use pingora_error::ErrorType::HTTPStatus;
 use pingora_http::{RequestHeader, ResponseHeader};
-use prometheus::{register_counter_vec, register_int_counter, CounterVec, IntCounter};
+use prometheus::{CounterVec, IntCounter, register_counter_vec, register_int_counter};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::from_slice;
-use tiktoken_rs::{cl100k_base, CoreBPE};
+use tiktoken_rs::CoreBPE;
 
-pub struct HttpGatewayConfig {
+use crate::rate_limiter::SlidingWindowRateLimiter;
+
+pub struct HttpGatewayConfig<R: SlidingWindowRateLimiter + Send + Sync> {
     pub openai_tls: bool,
     pub openai_port: u16,
     pub openai_domain: &'static str,
     pub tokenizer: CoreBPE,
+    pub sliding_window_rate_limiter: R,
 }
 
-pub struct HttpGateway {
+pub struct HttpGateway<R: SlidingWindowRateLimiter + Send + Sync> {
     tokenizer: CoreBPE,
     gateway_metrics: HttpGateWayMetrics,
     down_stream_peer: HttpGateWayDownstreamPeer,
+    sliding_window_rate_limiter: R,
 }
 
 struct HttpGateWayDownstreamPeer {
@@ -135,7 +139,7 @@ struct Delta {
 }
 
 #[async_trait]
-impl ProxyHttp for HttpGateway {
+impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
     type CTX = Ctx;
     fn new_ctx(&self) -> Self::CTX {
         Ctx {
@@ -168,8 +172,8 @@ impl ProxyHttp for HttpGateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()>
-    where
-        Self::CTX: Send + Sync,
+        where
+            Self::CTX: Send + Sync,
     {
         self.fill_openai_request(session, body, end_of_stream, ctx)?;
 
@@ -182,8 +186,8 @@ impl ProxyHttp for HttpGateway {
         upstream_request: &mut RequestHeader,
         _ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()>
-    where
-        Self::CTX: Send + Sync,
+        where
+            Self::CTX: Send + Sync,
     {
         upstream_request.insert_header("Host", self.down_stream_peer.addr)?;
         Ok(())
@@ -195,8 +199,8 @@ impl ProxyHttp for HttpGateway {
         upstream_response: &mut ResponseHeader,
         _ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()>
-    where
-        Self::CTX: Send + Sync,
+        where
+            Self::CTX: Send + Sync,
     {
         if upstream_response.status.as_u16() != 200 {
             return Err(Error::explain(
@@ -215,8 +219,8 @@ impl ProxyHttp for HttpGateway {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_error::Result<Option<std::time::Duration>>
-    where
-        Self::CTX: Send + Sync,
+        where
+            Self::CTX: Send + Sync,
     {
         let token_response_openai = self.get_openai_response(body, end_of_stream, ctx)?;
         if let Some(tokens) = token_response_openai {
@@ -253,8 +257,8 @@ impl ProxyHttp for HttpGateway {
     }
 
     async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX)
-    where
-        Self::CTX: Send + Sync,
+        where
+            Self::CTX: Send + Sync,
     {
         let response_code = session
             .response_written()
@@ -263,20 +267,6 @@ impl ProxyHttp for HttpGateway {
             "{} response code: {response_code}",
             self.request_summary(session, ctx)
         );
-    }
-}
-
-impl Default for HttpGateway {
-    fn default() -> Self {
-        Self {
-            tokenizer: cl100k_base().expect("Failed to load tokenizer"),
-            gateway_metrics: HttpGateWayMetrics::new(),
-            down_stream_peer: HttpGateWayDownstreamPeer {
-                tls: true,
-                addr: "0.0.0.0",
-                port: 443,
-            },
-        }
     }
 }
 
@@ -308,7 +298,7 @@ impl HttpGateWayMetrics {
                     "Number of prompt tokens by model",
                     &["model"]
                 )
-                .expect("Failed to register prompt token by model counter")
+                    .expect("Failed to register prompt token by model counter")
             }),
             completion_token_by_model_counter: COMPLETION_TOKEN_BY_MODEL_COUNTER.get_or_init(
                 || {
@@ -317,7 +307,7 @@ impl HttpGateWayMetrics {
                         "Number of completion tokens by model",
                         &["model"]
                     )
-                    .expect("Failed to register completion token by model counter")
+                        .expect("Failed to register completion token by model counter")
                 },
             ),
             total_token_by_model_counter: TOTAL_TOKEN_BY_MODEL_COUNTER.get_or_init(|| {
@@ -326,17 +316,20 @@ impl HttpGateWayMetrics {
                     "Number of total tokens by model",
                     &["model"]
                 )
-                .expect("Failed to register total token by model counter")
+                    .expect("Failed to register total token by model counter")
             }),
         }
     }
 }
 
-impl HttpGateway {
-    pub fn new(http_gateway_config: HttpGatewayConfig) -> AnyResult<Self> {
+impl<R: SlidingWindowRateLimiter + Send + Sync> HttpGateway<R> {
+    pub fn new(
+        http_gateway_config: HttpGatewayConfig<R>,
+    ) -> AnyResult<Self> {
         Ok(Self {
             tokenizer: http_gateway_config.tokenizer,
             gateway_metrics: HttpGateWayMetrics::new(),
+            sliding_window_rate_limiter: http_gateway_config.sliding_window_rate_limiter,
             down_stream_peer: HttpGateWayDownstreamPeer {
                 tls: http_gateway_config.openai_tls,
                 addr: http_gateway_config.openai_domain,
@@ -489,8 +482,8 @@ impl HttpGateway {
         end_of_stream: bool,
         ctx: &mut Ctx,
     ) -> pingora_error::Result<Option<TokenResponse>>
-    where
-        Ctx: Send + Sync,
+        where
+            Ctx: Send + Sync,
     {
         if let Some(openai_request) = &ctx.openai_request {
             self.extend_response_buffer(&mut ctx.buffer.resp_buffer, body);
@@ -615,14 +608,40 @@ mod tests {
     use std::thread;
 
     use httpmock::MockServer;
+    use mockall::mock;
     use pingora::prelude::http_proxy_service;
     use reqwest::StatusCode;
     use serde_json::json;
     use serde_json::Value;
     use tiktoken_rs::cl100k_base;
     use tokio::time;
+    use tokio::time::Duration;
+    use anyhow::Result;
+    use async_trait::async_trait;
 
     use crate::http_proxy::{HttpGateway, HttpGatewayConfig};
+    use crate::rate_limiter::SlidingWindowRateLimiter;
+
+    mock! {
+        SlidingWindowRateLimiterImpl {}
+        #[async_trait]
+        impl SlidingWindowRateLimiter for SlidingWindowRateLimiterImpl {
+            async fn record_sliding_window(
+                &self,
+                resource: &str,
+                subject: &str,
+                tokens: u64,
+                size: Duration,
+            ) -> Result<u64>;
+
+            async fn fetch_sliding_window(
+                &self,
+                resource: &str,
+                subject: &str,
+                size: Duration,
+            ) -> Result<u64>;
+        }
+    }
 
     #[tokio::test]
     async fn test_get_models() {
@@ -872,7 +891,7 @@ mod tests {
                     "http://127.0.0.1:{}/v1/chat/completions",
                     http_proxy_server_port
                 )
-                .as_str(),
+                    .as_str(),
             )
             .send()
             .await
@@ -1078,6 +1097,8 @@ mod tests {
         let tokenizer = cl100k_base().expect("Failed to load tokenizer");
         let free_port = find_free_port();
 
+        let mock_sliding_window_rate_limiter = MockSlidingWindowRateLimiterImpl::new();
+
         let mut http_proxy = http_proxy_service(
             &server.configuration,
             HttpGateway::new(HttpGatewayConfig {
@@ -1085,8 +1106,9 @@ mod tests {
                 openai_port: upstream_port,
                 openai_domain: "0.0.0.0",
                 tokenizer,
+                sliding_window_rate_limiter: mock_sliding_window_rate_limiter,
             })
-            .expect("Failed to create http gateway"),
+                .expect("Failed to create http gateway"),
         );
         http_proxy.add_tcp(format!("0.0.0.0:{}", free_port).as_str());
         server.add_service(http_proxy);
