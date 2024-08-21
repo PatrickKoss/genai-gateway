@@ -12,7 +12,19 @@ This project addresses these challenges by offering a gateway that facilitates i
 
 ![Gateway Architecture](./media/GenAIGatewayArchitecture.png)
 
-# Config
+# Run & Config
+
+The gateway can be run in the following way (currently no docker container is available, leave an issue if you want it):
+```bash
+OPENAI_TLS=true OPENAI_PORT=443 OPENAI_DOMAIN="api.openai.com" cargo run --release
+```
+
+After that you can send a request to the gateway:
+```bash
+curl -v -X POST http://127.0.0.1:8080/v1/chat/completions \
+ -d '{"model": "gpt-4o","messages": [{"role": "system", "content":"what are the best football players all time?"}], "max_tokens": 250,"temperature": 0.1, "stream": true}' \
+ -H "Authorization: Bearer <API_KEY>"
+```
 
 The gateway can be configured via flags or environment variables. The following flags are available:
 
