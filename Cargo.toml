@@ -18,7 +18,7 @@ serde_yaml = "0.8.26"
 tiktoken-rs = "0.5.9"
 env_logger = "0.11.5"
 log = "0.4.22"
-clap = { version = "4.5.15", features = ["derive"] }
+clap = { version = "4.5.15", features = ["derive", "env"] }
 redis = { version = "0.26.1", features = ["async-std-comp"] }
 time = "0.3.36"
 rand = "0.7.3"

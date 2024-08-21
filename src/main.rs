@@ -24,36 +24,74 @@ struct Args {
     #[arg(
         long,
         help = "Enable TLS for downstream OpenAI compatible endpoints",
-        default_value_t = true
+        default_value_t = true,
+        env
     )]
     openai_tls: bool,
     #[arg(
         long,
         help = "Port to use for downstream OpenAI compatible endpoints",
-        default_value_t = 443
+        default_value_t = 443,
+        env
     )]
     openai_port: u16,
     #[arg(
         long,
         default_value = "0.0.0.0",
-        help = "Domain to use for downstream OpenAI compatible endpoints"
+        help = "Domain to use for downstream OpenAI compatible endpoints",
+        env
     )]
     openai_domain: String,
-    #[arg(long, default_value = "8080", help = "Port to use for HTTP proxy")]
+    #[arg(long, default_value = "8080", help = "Port to use for HTTP proxy", env)]
     http_proxy_port: String,
-    #[arg(long, default_value = "9090", help = "Port to use for HTTP proxy metrics")]
+    #[arg(
+        long,
+        default_value = "9090",
+        help = "Port to use for HTTP proxy metrics",
+        env
+    )]
     http_proxy_metrics_port: String,
-    #[arg(long, default_value_t = false, help = "Enable rate limiting on user key")]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Enable rate limiting on user key",
+        env
+    )]
     enable_rate_limiting: bool,
-    #[arg(long, default_value = "redis://127.0.0.1:6379/0", help = "Redis connection string for the rate limiter")]
+    #[arg(
+        long,
+        default_value = "redis://127.0.0.1:6379/0",
+        help = "Redis connection string for the rate limiter",
+        env
+    )]
     rate_limiting_redis_connection_string: String,
-    #[arg(long, default_value_t = 5, help = "Redis pool size for the rate limiter")]
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Redis pool size for the rate limiter",
+        env
+    )]
     rate_limiting_redis_pool_size: usize,
-    #[arg(long, default_value_t = 60, help = "Rate limiting window duration size in minutes")]
+    #[arg(
+        long,
+        default_value_t = 60,
+        help = "Rate limiting window duration size in minutes",
+        env
+    )]
     rate_limiting_window_duration_size_min: u64,
-    #[arg(long, default_value_t = 1000, help = "Rate limiting max prompt tokens")]
+    #[arg(
+        long,
+        default_value_t = 1000,
+        help = "Rate limiting max prompt tokens",
+        env
+    )]
     rate_limiting_max_prompt_tokens: u64,
-    #[arg(long, default_value = "user", help = "Rate limiting user header key")]
+    #[arg(
+        long,
+        default_value = "user",
+        help = "Rate limiting user header key",
+        env
+    )]
     rate_limiting_user_header_key: String,
 }
 
@@ -112,7 +150,7 @@ fn main() {
                 rate_limiting_user_header_key: rate_limiting_user_header_key.leak(),
             },
         })
-            .expect("Failed to create http gateway"),
+        .expect("Failed to create http gateway"),
     );
 
     http_proxy.add_tcp(format!("0.0.0.0:{}", http_proxy_port).as_str());

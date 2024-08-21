@@ -21,27 +21,27 @@ Usage: genai-gateway [OPTIONS]
 
 Options:
       --openai-tls
-          Enable TLS for downstream OpenAI compatible endpoints
+          Enable TLS for downstream OpenAI compatible endpoints [env: OPENAI_TLS=]
       --openai-port <OPENAI_PORT>
-          Port to use for downstream OpenAI compatible endpoints [default: 443]
+          Port to use for downstream OpenAI compatible endpoints [env: OPENAI_PORT=] [default: 443]
       --openai-domain <OPENAI_DOMAIN>
-          Domain to use for downstream OpenAI compatible endpoints [default: 0.0.0.0]
+          Domain to use for downstream OpenAI compatible endpoints [env: OPENAI_DOMAIN=] [default: 0.0.0.0]
       --http-proxy-port <HTTP_PROXY_PORT>
-          Port to use for HTTP proxy [default: 8080]
+          Port to use for HTTP proxy [env: HTTP_PROXY_PORT=] [default: 8080]
       --http-proxy-metrics-port <HTTP_PROXY_METRICS_PORT>
-          Port to use for HTTP proxy metrics [default: 9090]
+          Port to use for HTTP proxy metrics [env: HTTP_PROXY_METRICS_PORT=] [default: 9090]
       --enable-rate-limiting
-          Enable rate limiting on user key
+          Enable rate limiting on user key [env: ENABLE_RATE_LIMITING=]
       --rate-limiting-redis-connection-string <RATE_LIMITING_REDIS_CONNECTION_STRING>
-          Redis connection string for the rate limiter [default: redis://127.0.0.1:6379/0]
+          Redis connection string for the rate limiter [env: RATE_LIMITING_REDIS_CONNECTION_STRING=] [default: redis://127.0.0.1:6379/0]
       --rate-limiting-redis-pool-size <RATE_LIMITING_REDIS_POOL_SIZE>
-          Redis pool size for the rate limiter [default: 5]
+          Redis pool size for the rate limiter [env: RATE_LIMITING_REDIS_POOL_SIZE=] [default: 5]
       --rate-limiting-window-duration-size-min <RATE_LIMITING_WINDOW_DURATION_SIZE_MIN>
-          Rate limiting window duration size in minutes [default: 60]
+          Rate limiting window duration size in minutes [env: RATE_LIMITING_WINDOW_DURATION_SIZE_MIN=] [default: 60]
       --rate-limiting-max-prompt-tokens <RATE_LIMITING_MAX_PROMPT_TOKENS>
-          Rate limiting max prompt tokens [default: 1000]
+          Rate limiting max prompt tokens [env: RATE_LIMITING_MAX_PROMPT_TOKENS=] [default: 1000]
       --rate-limiting-user-header-key <RATE_LIMITING_USER_HEADER_KEY>
-          Rate limiting user header key [default: user]
+          Rate limiting user header key [env: RATE_LIMITING_USER_HEADER_KEY=] [default: user]
   -h, --help
           Print help
   -V, --version
