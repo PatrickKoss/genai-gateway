@@ -10,7 +10,7 @@ use pingora_core::prelude::HttpPeer;
 use pingora_error::Error;
 use pingora_error::ErrorType::HTTPStatus;
 use pingora_http::{RequestHeader, ResponseHeader};
-use prometheus::{register_counter_vec, register_int_counter, CounterVec, IntCounter};
+use prometheus::{CounterVec, IntCounter, register_counter_vec, register_int_counter};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::from_slice;
@@ -19,11 +19,21 @@ use tiktoken_rs::CoreBPE;
 use crate::rate_limiter::SlidingWindowRateLimiter;
 
 pub struct HttpGatewayConfig<R: SlidingWindowRateLimiter + Send + Sync> {
+    pub openai_config: OpenAIConfig,
+    pub tokenizer: CoreBPE,
+    pub sliding_window_rate_limiter: R,
+    pub rate_limiting_config: RateLimitingConfig,
+}
+
+pub struct RateLimitingConfig {
+    pub rate_limiting_window_duration_size_min: u64,
+    pub rate_limiting_max_prompt_tokens: u64,
+}
+
+pub struct OpenAIConfig {
     pub openai_tls: bool,
     pub openai_port: u16,
     pub openai_domain: &'static str,
-    pub tokenizer: CoreBPE,
-    pub sliding_window_rate_limiter: R,
 }
 
 pub struct HttpGateway<R: SlidingWindowRateLimiter + Send + Sync> {
@@ -31,6 +41,7 @@ pub struct HttpGateway<R: SlidingWindowRateLimiter + Send + Sync> {
     gateway_metrics: HttpGateWayMetrics,
     down_stream_peer: HttpGateWayDownstreamPeer,
     sliding_window_rate_limiter: R,
+    rate_limiting_config: RateLimitingConfig,
 }
 
 struct HttpGateWayDownstreamPeer {
@@ -173,8 +184,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()>
-    where
-        Self::CTX: Send + Sync,
+        where
+            Self::CTX: Send + Sync,
     {
         self.fill_openai_request(session, body, end_of_stream, ctx)?;
 
@@ -187,19 +198,22 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         upstream_request: &mut RequestHeader,
         _ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()>
-    where
-        Self::CTX: Send + Sync,
+        where
+            Self::CTX: Send + Sync,
     {
         upstream_request.insert_header("Host", self.down_stream_peer.addr)?;
+        upstream_request.insert_header("Content-Type", "application/json")?;
 
-        // TODO add config for how many tokens to rate limit and get subject from header
-        // TODO move this part to the openai stuff in the other implementation since it is specific to that
         let count = self
             .sliding_window_rate_limiter
-            .fetch_sliding_window("user", "test", Duration::from_hours(1))
+            .fetch_sliding_window(
+                "user",
+                "test",
+                Duration::from_mins(self.rate_limiting_config.rate_limiting_max_prompt_tokens),
+            )
             .await
             .map_err(|e| Error::explain(HTTPStatus(502), e.to_string()))?;
-        if count > 100 {
+        if count > self.rate_limiting_config.rate_limiting_max_prompt_tokens {
             return Err(Error::explain(HTTPStatus(429), "rate limit exceeded"));
         }
 
@@ -212,8 +226,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         upstream_response: &mut ResponseHeader,
         _ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()>
-    where
-        Self::CTX: Send + Sync,
+        where
+            Self::CTX: Send + Sync,
     {
         if upstream_response.status.as_u16() != 200 {
             return Err(Error::explain(
@@ -232,8 +246,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_error::Result<Option<Duration>>
-    where
-        Self::CTX: Send + Sync,
+        where
+            Self::CTX: Send + Sync,
     {
         let token_response_openai = self.get_openai_response(body, end_of_stream, ctx)?;
         if let Some(tokens) = token_response_openai {
@@ -266,12 +280,15 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
                 .inc_by((tokens.completion_tokens + tokens.prompt_tokens) as f64);
 
             // we willingly ignore the future here since the method can´t be async
-            // TODO add config for window size
+            // TODO add correct resource and subject
             let _ = self.sliding_window_rate_limiter.record_sliding_window(
                 "user",
                 "test",
                 tokens.completion_tokens + tokens.prompt_tokens,
-                Duration::from_hours(1),
+                Duration::from_mins(
+                    self.rate_limiting_config
+                        .rate_limiting_window_duration_size_min,
+                ),
             );
         }
 
@@ -279,8 +296,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
     }
 
     async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX)
-    where
-        Self::CTX: Send + Sync,
+        where
+            Self::CTX: Send + Sync,
     {
         let response_code = session
             .response_written()
@@ -320,7 +337,7 @@ impl HttpGateWayMetrics {
                     "Number of prompt tokens by model",
                     &["model"]
                 )
-                .expect("Failed to register prompt token by model counter")
+                    .expect("Failed to register prompt token by model counter")
             }),
             completion_token_by_model_counter: COMPLETION_TOKEN_BY_MODEL_COUNTER.get_or_init(
                 || {
@@ -329,7 +346,7 @@ impl HttpGateWayMetrics {
                         "Number of completion tokens by model",
                         &["model"]
                     )
-                    .expect("Failed to register completion token by model counter")
+                        .expect("Failed to register completion token by model counter")
                 },
             ),
             total_token_by_model_counter: TOTAL_TOKEN_BY_MODEL_COUNTER.get_or_init(|| {
@@ -338,7 +355,7 @@ impl HttpGateWayMetrics {
                     "Number of total tokens by model",
                     &["model"]
                 )
-                .expect("Failed to register total token by model counter")
+                    .expect("Failed to register total token by model counter")
             }),
         }
     }
@@ -351,10 +368,11 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> HttpGateway<R> {
             gateway_metrics: HttpGateWayMetrics::new(),
             sliding_window_rate_limiter: http_gateway_config.sliding_window_rate_limiter,
             down_stream_peer: HttpGateWayDownstreamPeer {
-                tls: http_gateway_config.openai_tls,
-                addr: http_gateway_config.openai_domain,
-                port: http_gateway_config.openai_port,
+                tls: http_gateway_config.openai_config.openai_tls,
+                addr: http_gateway_config.openai_config.openai_domain,
+                port: http_gateway_config.openai_config.openai_port,
             },
+            rate_limiting_config: http_gateway_config.rate_limiting_config,
         })
     }
 
@@ -502,8 +520,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> HttpGateway<R> {
         end_of_stream: bool,
         ctx: &mut Ctx,
     ) -> pingora_error::Result<Option<TokenResponse>>
-    where
-        Ctx: Send + Sync,
+        where
+            Ctx: Send + Sync,
     {
         if let Some(openai_request) = &ctx.openai_request {
             self.extend_response_buffer(&mut ctx.buffer.resp_buffer, body);
@@ -639,7 +657,7 @@ mod tests {
     use tokio::time;
     use tokio::time::Duration;
 
-    use crate::http_proxy::{HttpGateway, HttpGatewayConfig};
+    use crate::http_proxy::{HttpGateway, HttpGatewayConfig, OpenAIConfig, RateLimitingConfig};
     use crate::rate_limiter::SlidingWindowRateLimiter;
 
     mock! {
@@ -911,7 +929,7 @@ mod tests {
                     "http://127.0.0.1:{}/v1/chat/completions",
                     http_proxy_server_port
                 )
-                .as_str(),
+                    .as_str(),
             )
             .send()
             .await
@@ -1115,7 +1133,6 @@ mod tests {
             .expect_record_sliding_window()
             .times(1)
             .returning(|_, _, _, _| Ok(0));
-        // TODO adjust the test for dynamic rate limiting tokens
         mock_sliding_window_rate_limiter
             .expect_fetch_sliding_window()
             .times(1)
@@ -1161,13 +1178,19 @@ mod tests {
         let mut http_proxy = http_proxy_service(
             &server.configuration,
             HttpGateway::new(HttpGatewayConfig {
-                openai_tls: false,
-                openai_port: upstream_port,
-                openai_domain: "0.0.0.0",
+                openai_config: OpenAIConfig {
+                    openai_tls: false,
+                    openai_port: upstream_port,
+                    openai_domain: "0.0.0.0",
+                },
                 tokenizer,
                 sliding_window_rate_limiter: mock_sliding_window_rate_limiter,
+                rate_limiting_config: RateLimitingConfig {
+                    rate_limiting_window_duration_size_min: 1,
+                    rate_limiting_max_prompt_tokens: 100,
+                },
             })
-            .expect("Failed to create http gateway"),
+                .expect("Failed to create http gateway"),
         );
         http_proxy.add_tcp(format!("0.0.0.0:{}", free_port).as_str());
         server.add_service(http_proxy);

@@ -8,9 +8,10 @@ use pingora::prelude::*;
 use redis::Client;
 use tiktoken_rs::cl100k_base;
 
-use crate::rate_limiter::SlidingWindowRateLimiterEnum;
 use http_proxy::{HttpGateway, HttpGatewayConfig};
 
+use crate::http_proxy::{OpenAIConfig, RateLimitingConfig};
+use crate::rate_limiter::SlidingWindowRateLimiterEnum;
 use crate::redis_async_pool::RedisConnectionManager;
 
 mod http_proxy;
@@ -36,6 +37,10 @@ struct Args {
     rate_limiting_redis_connection_string: String,
     #[arg(long, default_value_t = 5)]
     rate_limiting_redis_pool_size: usize,
+    #[arg(long, default_value_t = 60)]
+    rate_limiting_window_duration_size_min: u64,
+    #[arg(long, default_value_t = 1000)]
+    rate_limiting_max_prompt_tokens: u64,
 }
 
 fn main() {
@@ -70,6 +75,16 @@ fn main() {
         .unwrap_or(args.rate_limiting_redis_pool_size.to_string())
         .parse::<usize>()
         .expect("Failed to parse RATE_LIMITING_REDIS_POOL_SIZE");
+    let rate_limiting_window_duration_size_min = env::var("RATE_LIMITING_WINDOW_DURATION_SIZE_MIN")
+        .ok()
+        .unwrap_or(args.rate_limiting_window_duration_size_min.to_string())
+        .parse::<u64>()
+        .expect("Failed to parse RATE_LIMITING_WINDOW_DURATION_SIZE_MIN");
+    let rate_limiting_max_prompt_tokens = env::var("RATE_LIMITING_MAX_PROMPT_TOKENS")
+        .ok()
+        .unwrap_or(args.rate_limiting_max_prompt_tokens.to_string())
+        .parse::<u64>()
+        .expect("Failed to parse RATE_LIMITING_MAX_PROMPT_TOKENS");
 
     env_logger::init();
 
@@ -99,11 +114,17 @@ fn main() {
     let mut http_proxy = http_proxy_service(
         &server.configuration,
         HttpGateway::new(HttpGatewayConfig {
-            openai_tls,
-            openai_port,
-            openai_domain: openai_domain.leak(),
+            openai_config: OpenAIConfig {
+                openai_tls,
+                openai_port,
+                openai_domain: openai_domain.leak(),
+            },
             tokenizer,
             sliding_window_rate_limiter: rate_limiter,
+            rate_limiting_config: RateLimitingConfig {
+                rate_limiting_max_prompt_tokens,
+                rate_limiting_window_duration_size_min,
+            },
         })
         .expect("Failed to create http gateway"),
     );
