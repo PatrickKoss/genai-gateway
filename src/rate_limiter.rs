@@ -222,7 +222,7 @@ mod tests {
     #[tokio::test]
     async fn test_ratelimiting() {
         let tokens = 10;
-        let size = Duration::from_secs(1);
+        let size = Duration::from_secs(2);
 
         // setup redis with test containers
         let free_port = find_free_port();
@@ -269,7 +269,7 @@ mod tests {
 
         assert_eq!(count, 0);
 
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        tokio::time::sleep(Duration::from_millis(2100)).await;
 
         // test reset of the window
         let count = rate_limiter

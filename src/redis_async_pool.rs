@@ -58,7 +58,7 @@ impl Manager for RedisConnectionManager {
 
     async fn recycle(
         &self,
-        conn: &mut Self::Type,
+        mut conn: &mut Self::Type,
         _metrics: &Metrics,
     ) -> RecycleResult<Self::Error> {
         if self.check_on_recycle {
@@ -118,25 +118,6 @@ impl AsRef<redis::aio::MultiplexedConnection> for RedisConnection {
     }
 }
 
-impl ConnectionLike for RedisConnection {
-    fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
-        self.actual.req_packed_command(cmd)
-    }
-
-    fn req_packed_commands<'a>(
-        &'a mut self,
-        cmd: &'a Pipeline,
-        offset: usize,
-        count: usize,
-    ) -> RedisFuture<'a, Vec<Value>> {
-        self.actual.req_packed_commands(cmd, offset, count)
-    }
-
-    fn get_db(&self) -> i64 {
-        self.actual.get_db()
-    }
-}
-
 impl ConnectionLike for &mut RedisConnection {
     fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
         (**self).req_packed_command(cmd)
@@ -153,5 +134,84 @@ impl ConnectionLike for &mut RedisConnection {
 
     fn get_db(&self) -> i64 {
         (**self).get_db()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
+    use std::ops::DerefMut;
+
+    use deadpool::managed::{Pool, PoolConfig};
+    use redis::{AsyncCommands, Client};
+    use testcontainers::{
+        core::{IntoContainerPort, WaitFor},
+        runners::AsyncRunner,
+        GenericImage, ImageExt,
+    };
+
+    use crate::redis_async_pool::RedisConnectionManager;
+
+    #[tokio::test]
+    async fn test_ratelimiting() {
+        // setup redis with test containers
+        let free_port = find_free_port();
+        let container = GenericImage::new("redis", "7.2.4")
+            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+            .with_mapped_port(free_port, 6379.tcp())
+            .start()
+            .await
+            .expect("Redis started");
+
+        // init redis connection
+        let redis_url = format!("redis://127.0.0.1:{}/0", free_port);
+        let client = Client::open(redis_url).expect("Failed to create Redis client");
+
+        let pool_config = PoolConfig::default();
+        let connection_pool: Pool<RedisConnectionManager> =
+            Pool::builder(RedisConnectionManager::new(client, true, None))
+                .config(pool_config)
+                .max_size(5)
+                .build()
+                .expect("Failed to create Redis pool");
+
+        let mut conn = connection_pool
+            .get()
+            .await
+            .expect("Failed to get connection");
+        let _: Option<u64> = conn
+            .incr("async_pool_test_key", 1)
+            .await
+            .expect("Failed to increment key");
+        let curr: Option<u64> = conn
+            .get("async_pool_test_key")
+            .await
+            .expect("Failed to get key");
+        assert_eq!(curr, Some(1));
+
+        let mut redis_conn = conn.deref_mut();
+
+        let (previous_count, current_count): (Option<u64>, Option<u64>) = redis::pipe()
+            .atomic()
+            .get("async_pool_test_key")
+            .incr("async_pool_test_key", 1)
+            .expire("async_pool_test_key", (1 * 2) as i64)
+            .ignore()
+            .query_async(&mut redis_conn)
+            .await
+            .expect("Failed to execute pipeline");
+
+        assert_eq!(previous_count, Some(1));
+        assert_eq!(current_count, Some(2));
+
+        container
+            .stop()
+            .await
+            .expect("Failed to stop Redis container");
+    }
+
+    fn find_free_port() -> u16 {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.local_addr().unwrap().port()
     }
 }
