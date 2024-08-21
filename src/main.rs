@@ -41,6 +41,8 @@ struct Args {
     rate_limiting_window_duration_size_min: u64,
     #[arg(long, default_value_t = 1000)]
     rate_limiting_max_prompt_tokens: u64,
+    #[arg(long, default_value = "user")]
+    rate_limiting_user_header_key: String,
 }
 
 fn main() {
@@ -85,6 +87,9 @@ fn main() {
         .unwrap_or(args.rate_limiting_max_prompt_tokens.to_string())
         .parse::<u64>()
         .expect("Failed to parse RATE_LIMITING_MAX_PROMPT_TOKENS");
+    let rate_limiting_user_header_key = env::var("RATE_LIMITING_USER_HEADER_KEY")
+        .ok()
+        .unwrap_or(args.rate_limiting_user_header_key.to_string());
 
     env_logger::init();
 
@@ -124,6 +129,7 @@ fn main() {
             rate_limiting_config: RateLimitingConfig {
                 rate_limiting_max_prompt_tokens,
                 rate_limiting_window_duration_size_min,
+                rate_limiting_user_header_key: rate_limiting_user_header_key.leak(),
             },
         })
         .expect("Failed to create http gateway"),

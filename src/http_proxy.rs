@@ -18,6 +18,8 @@ use tiktoken_rs::CoreBPE;
 
 use crate::rate_limiter::SlidingWindowRateLimiter;
 
+const USER_RESOURCE: &'static str = "user";
+
 pub struct HttpGatewayConfig<R: SlidingWindowRateLimiter + Send + Sync> {
     pub openai_config: OpenAIConfig,
     pub tokenizer: CoreBPE,
@@ -28,6 +30,7 @@ pub struct HttpGatewayConfig<R: SlidingWindowRateLimiter + Send + Sync> {
 pub struct RateLimitingConfig {
     pub rate_limiting_window_duration_size_min: u64,
     pub rate_limiting_max_prompt_tokens: u64,
+    pub rate_limiting_user_header_key: &'static str,
 }
 
 pub struct OpenAIConfig {
@@ -57,11 +60,19 @@ struct HttpGateWayMetrics {
     prompt_token_by_model_counter: &'static CounterVec,
     completion_token_by_model_counter: &'static CounterVec,
     total_token_by_model_counter: &'static CounterVec,
+    prompt_token_by_user_by_model_counter: &'static CounterVec,
+    completion_token_by_user_by_model_counter: &'static CounterVec,
+    total_token_by_user_by_model_counter: &'static CounterVec,
 }
 
 pub struct Ctx {
     buffer: CtxBuffer,
     openai_request: Option<OpenAIRequest>,
+    rate_limiting: Option<RateLimitingCtx>,
+}
+
+pub struct RateLimitingCtx {
+    pub user: String,
 }
 
 #[derive(Clone)]
@@ -160,6 +171,7 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
                 req_buffer: vec![],
             },
             openai_request: None,
+            rate_limiting: None,
         }
     }
 
@@ -194,9 +206,9 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
 
     async fn upstream_request_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_request: &mut RequestHeader,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()>
     where
         Self::CTX: Send + Sync,
@@ -204,11 +216,20 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         upstream_request.insert_header("Host", self.down_stream_peer.addr)?;
         upstream_request.insert_header("Content-Type", "application/json")?;
 
+        let req = session.req_header().headers.clone();
+        let rate_limiting_user = req
+            .get(self.rate_limiting_config.rate_limiting_user_header_key)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        ctx.rate_limiting = Some(RateLimitingCtx {
+            user: rate_limiting_user.to_string(),
+        });
+
         let count = self
             .sliding_window_rate_limiter
             .fetch_sliding_window(
-                "user",
-                "test",
+                USER_RESOURCE,
+                rate_limiting_user,
                 Duration::from_mins(self.rate_limiting_config.rate_limiting_max_prompt_tokens),
             )
             .await
@@ -257,6 +278,9 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
                 ""
             };
 
+            let rate_limiting_ctx = ctx.rate_limiting.as_ref().unwrap();
+            let rate_limiting_user = &rate_limiting_ctx.user;
+
             self.gateway_metrics
                 .completion_token_counter
                 .inc_by(tokens.completion_tokens);
@@ -278,12 +302,24 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
                 .total_token_by_model_counter
                 .with_label_values(&[model])
                 .inc_by((tokens.completion_tokens + tokens.prompt_tokens) as f64);
+            self.gateway_metrics
+                .prompt_token_by_user_by_model_counter
+                .with_label_values(&[rate_limiting_user, model])
+                .inc_by(tokens.prompt_tokens as f64);
+            self.gateway_metrics
+                .completion_token_by_user_by_model_counter
+                .with_label_values(&[rate_limiting_user, model])
+                .inc_by(tokens.completion_tokens as f64);
+            self.gateway_metrics
+                .total_token_by_user_by_model_counter
+                .with_label_values(&[rate_limiting_user, model])
+                .inc_by((tokens.completion_tokens + tokens.prompt_tokens) as f64);
 
             // we willingly ignore the future here since the method can´t be async
             // TODO add correct resource and subject
             let _ = self.sliding_window_rate_limiter.record_sliding_window(
-                "user",
-                "test",
+                USER_RESOURCE,
+                rate_limiting_user.as_str(),
                 tokens.completion_tokens + tokens.prompt_tokens,
                 Duration::from_mins(
                     self.rate_limiting_config
@@ -317,6 +353,9 @@ impl HttpGateWayMetrics {
         static PROMPT_TOKEN_BY_MODEL_COUNTER: OnceLock<CounterVec> = OnceLock::new();
         static COMPLETION_TOKEN_BY_MODEL_COUNTER: OnceLock<CounterVec> = OnceLock::new();
         static TOTAL_TOKEN_BY_MODEL_COUNTER: OnceLock<CounterVec> = OnceLock::new();
+        static PROMPT_TOKEN_BY_USER_MODEL_COUNTER: OnceLock<CounterVec> = OnceLock::new();
+        static COMPLETION_TOKEN_BY_USER_MODEL_COUNTER: OnceLock<CounterVec> = OnceLock::new();
+        static TOTAL_TOKEN_BY_USER_MODEL_COUNTER: OnceLock<CounterVec> = OnceLock::new();
 
         Self {
             prompt_token_counter: PROMPT_TOKEN_COUNTER.get_or_init(|| {
@@ -357,6 +396,35 @@ impl HttpGateWayMetrics {
                 )
                 .expect("Failed to register total token by model counter")
             }),
+            prompt_token_by_user_by_model_counter: PROMPT_TOKEN_BY_USER_MODEL_COUNTER.get_or_init(
+                || {
+                    register_counter_vec!(
+                        "prompt_tokens_by_user_by_model_total",
+                        "Number of prompt tokens by user by model",
+                        &["user", "model"]
+                    )
+                    .expect("Failed to register prompt token by user by model counter")
+                },
+            ),
+            completion_token_by_user_by_model_counter: COMPLETION_TOKEN_BY_USER_MODEL_COUNTER
+                .get_or_init(|| {
+                    register_counter_vec!(
+                        "completion_tokens_by_user_by_model_total",
+                        "Number of completion tokens by user by model",
+                        &["user", "model"]
+                    )
+                    .expect("Failed to register completion token by user by model counter")
+                }),
+            total_token_by_user_by_model_counter: TOTAL_TOKEN_BY_USER_MODEL_COUNTER.get_or_init(
+                || {
+                    register_counter_vec!(
+                        "tokens_by_user_by_model_total",
+                        "Number of total tokens by user by model",
+                        &["user", "model"]
+                    )
+                    .expect("Failed to register total token by user by model counter")
+                },
+            ),
         }
     }
 }
@@ -1188,6 +1256,7 @@ mod tests {
                 rate_limiting_config: RateLimitingConfig {
                     rate_limiting_window_duration_size_min: 1,
                     rate_limiting_max_prompt_tokens: 100,
+                    rate_limiting_user_header_key: "user",
                 },
             })
             .expect("Failed to create http gateway"),
