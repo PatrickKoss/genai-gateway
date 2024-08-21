@@ -10,7 +10,7 @@ use pingora_core::prelude::HttpPeer;
 use pingora_error::Error;
 use pingora_error::ErrorType::HTTPStatus;
 use pingora_http::{RequestHeader, ResponseHeader};
-use prometheus::{CounterVec, IntCounter, register_counter_vec, register_int_counter};
+use prometheus::{register_counter_vec, register_int_counter, CounterVec, IntCounter};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::from_slice;
@@ -184,8 +184,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()>
-        where
-            Self::CTX: Send + Sync,
+    where
+        Self::CTX: Send + Sync,
     {
         self.fill_openai_request(session, body, end_of_stream, ctx)?;
 
@@ -198,8 +198,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         upstream_request: &mut RequestHeader,
         _ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()>
-        where
-            Self::CTX: Send + Sync,
+    where
+        Self::CTX: Send + Sync,
     {
         upstream_request.insert_header("Host", self.down_stream_peer.addr)?;
         upstream_request.insert_header("Content-Type", "application/json")?;
@@ -226,8 +226,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         upstream_response: &mut ResponseHeader,
         _ctx: &mut Self::CTX,
     ) -> pingora_error::Result<()>
-        where
-            Self::CTX: Send + Sync,
+    where
+        Self::CTX: Send + Sync,
     {
         if upstream_response.status.as_u16() != 200 {
             return Err(Error::explain(
@@ -246,8 +246,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora_error::Result<Option<Duration>>
-        where
-            Self::CTX: Send + Sync,
+    where
+        Self::CTX: Send + Sync,
     {
         let token_response_openai = self.get_openai_response(body, end_of_stream, ctx)?;
         if let Some(tokens) = token_response_openai {
@@ -296,8 +296,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
     }
 
     async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX)
-        where
-            Self::CTX: Send + Sync,
+    where
+        Self::CTX: Send + Sync,
     {
         let response_code = session
             .response_written()
@@ -337,7 +337,7 @@ impl HttpGateWayMetrics {
                     "Number of prompt tokens by model",
                     &["model"]
                 )
-                    .expect("Failed to register prompt token by model counter")
+                .expect("Failed to register prompt token by model counter")
             }),
             completion_token_by_model_counter: COMPLETION_TOKEN_BY_MODEL_COUNTER.get_or_init(
                 || {
@@ -346,7 +346,7 @@ impl HttpGateWayMetrics {
                         "Number of completion tokens by model",
                         &["model"]
                     )
-                        .expect("Failed to register completion token by model counter")
+                    .expect("Failed to register completion token by model counter")
                 },
             ),
             total_token_by_model_counter: TOTAL_TOKEN_BY_MODEL_COUNTER.get_or_init(|| {
@@ -355,7 +355,7 @@ impl HttpGateWayMetrics {
                     "Number of total tokens by model",
                     &["model"]
                 )
-                    .expect("Failed to register total token by model counter")
+                .expect("Failed to register total token by model counter")
             }),
         }
     }
@@ -520,8 +520,8 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> HttpGateway<R> {
         end_of_stream: bool,
         ctx: &mut Ctx,
     ) -> pingora_error::Result<Option<TokenResponse>>
-        where
-            Ctx: Send + Sync,
+    where
+        Ctx: Send + Sync,
     {
         if let Some(openai_request) = &ctx.openai_request {
             self.extend_response_buffer(&mut ctx.buffer.resp_buffer, body);
@@ -929,7 +929,7 @@ mod tests {
                     "http://127.0.0.1:{}/v1/chat/completions",
                     http_proxy_server_port
                 )
-                    .as_str(),
+                .as_str(),
             )
             .send()
             .await
@@ -1190,7 +1190,7 @@ mod tests {
                     rate_limiting_max_prompt_tokens: 100,
                 },
             })
-                .expect("Failed to create http gateway"),
+            .expect("Failed to create http gateway"),
         );
         http_proxy.add_tcp(format!("0.0.0.0:{}", free_port).as_str());
         server.add_service(http_proxy);

@@ -6,7 +6,8 @@ use std::{
 
 use deadpool::managed::{Manager, Metrics, RecycleError, RecycleResult};
 use rand::Rng;
-use redis::{AsyncCommands, RedisError};
+use redis::aio::ConnectionLike;
+use redis::{AsyncCommands, Cmd, Pipeline, RedisError, RedisFuture, Value};
 
 pub enum Ttl {
     Simple(Duration),
@@ -114,5 +115,43 @@ impl AsMut<redis::aio::MultiplexedConnection> for RedisConnection {
 impl AsRef<redis::aio::MultiplexedConnection> for RedisConnection {
     fn as_ref(&self) -> &redis::aio::MultiplexedConnection {
         &self.actual
+    }
+}
+
+impl ConnectionLike for RedisConnection {
+    fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
+        self.actual.req_packed_command(cmd)
+    }
+
+    fn req_packed_commands<'a>(
+        &'a mut self,
+        cmd: &'a Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisFuture<'a, Vec<Value>> {
+        self.actual.req_packed_commands(cmd, offset, count)
+    }
+
+    fn get_db(&self) -> i64 {
+        self.actual.get_db()
+    }
+}
+
+impl ConnectionLike for &mut RedisConnection {
+    fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
+        (**self).req_packed_command(cmd)
+    }
+
+    fn req_packed_commands<'a>(
+        &'a mut self,
+        cmd: &'a Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisFuture<'a, Vec<Value>> {
+        (**self).req_packed_commands(cmd, offset, count)
+    }
+
+    fn get_db(&self) -> i64 {
+        (**self).get_db()
     }
 }

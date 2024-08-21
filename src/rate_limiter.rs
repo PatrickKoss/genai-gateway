@@ -1,3 +1,4 @@
+use std::ops::DerefMut;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -56,11 +57,15 @@ impl SlidingWindowRateLimiter for RedisSlidingWindowRateLimiter {
         );
 
         let mut connection = self.connection_pool.get().await?;
+        let mut redis_conn = connection.deref_mut();
 
-        let previous_count: Option<u64> = connection.get(&previous_key).await?;
-        let current_count: Option<u64> = connection.incr(&current_key, tokens).await?;
-        connection
-            .expire::<_, i64>(&current_key, (size_secs * 2) as i64)
+        let (previous_count, current_count): (Option<u64>, Option<u64>) = redis::pipe()
+            .atomic()
+            .get(&previous_key)
+            .incr(&current_key, tokens)
+            .expire(&current_key, (size_secs * 2) as i64)
+            .ignore()
+            .query_async(&mut redis_conn)
             .await?;
 
         Ok(Self::sliding_window_count(
@@ -199,7 +204,6 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
     use std::time::Duration;
 
-    use crate::rate_limiter;
     use deadpool::managed::{Pool, PoolConfig};
     use redis::Client;
     use testcontainers::{
@@ -208,6 +212,7 @@ mod tests {
         GenericImage, ImageExt,
     };
 
+    use crate::rate_limiter;
     use crate::rate_limiter::{
         DummySlidingWindowRateLimiter, RedisSlidingWindowRateLimiter, SlidingWindowRateLimiter,
         SlidingWindowRateLimiterEnum,
