@@ -316,7 +316,6 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> ProxyHttp for HttpGateway<R> {
                 .inc_by((tokens.completion_tokens + tokens.prompt_tokens) as f64);
 
             // we willingly ignore the future here since the method can´t be async
-            // TODO add correct resource and subject
             let _ = self.sliding_window_rate_limiter.record_sliding_window(
                 USER_RESOURCE,
                 rate_limiting_user.as_str(),

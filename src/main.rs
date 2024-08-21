@@ -21,75 +21,55 @@ mod redis_async_pool;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(long, default_value_t = true)]
+    #[arg(
+        long,
+        help = "Enable TLS for downstream OpenAI compatible endpoints",
+        default_value_t = true
+    )]
     openai_tls: bool,
-    #[arg(long, default_value_t = 443)]
+    #[arg(
+        long,
+        help = "Port to use for downstream OpenAI compatible endpoints",
+        default_value_t = 443
+    )]
     openai_port: u16,
-    #[arg(long, default_value = "0.0.0.0")]
+    #[arg(
+        long,
+        default_value = "0.0.0.0",
+        help = "Domain to use for downstream OpenAI compatible endpoints"
+    )]
     openai_domain: String,
-    #[arg(long, default_value = "6188")]
+    #[arg(long, default_value = "8080", help = "Port to use for HTTP proxy")]
     http_proxy_port: String,
-    #[arg(long, default_value = "6192")]
+    #[arg(long, default_value = "9090", help = "Port to use for HTTP proxy metrics")]
     http_proxy_metrics_port: String,
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, help = "Enable rate limiting on user key")]
     enable_rate_limiting: bool,
-    #[arg(long, default_value = "redis://127.0.0.1:6379/0")]
+    #[arg(long, default_value = "redis://127.0.0.1:6379/0", help = "Redis connection string for the rate limiter")]
     rate_limiting_redis_connection_string: String,
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 5, help = "Redis pool size for the rate limiter")]
     rate_limiting_redis_pool_size: usize,
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 60, help = "Rate limiting window duration size in minutes")]
     rate_limiting_window_duration_size_min: u64,
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 1000, help = "Rate limiting max prompt tokens")]
     rate_limiting_max_prompt_tokens: u64,
-    #[arg(long, default_value = "user")]
+    #[arg(long, default_value = "user", help = "Rate limiting user header key")]
     rate_limiting_user_header_key: String,
 }
 
 fn main() {
     let args = Args::parse();
-    let openai_tls = env::var("OPENAI_TLS")
-        .unwrap_or_else(|_| args.openai_tls.to_string())
-        .parse::<bool>()
-        .expect("Failed to parse OPENAI_TLS");
-    let openai_port = env::var("OPENAI_PORT")
-        .ok()
-        .unwrap_or(args.openai_port.to_string())
-        .parse::<u16>()
-        .expect("Failed to parse OPENAI_PORT");
-    let openai_domain = env::var("OPENAI_DOMAIN")
-        .ok()
-        .unwrap_or(args.openai_domain.to_string());
-    let http_proxy_port = env::var("HTTP_PROXY_PORT")
-        .ok()
-        .unwrap_or(args.http_proxy_port.to_string());
-    let http_proxy_metrics_port = env::var("HTTP_PROXY_METRICS_PORT")
-        .ok()
-        .unwrap_or(args.http_proxy_metrics_port.to_string());
-    let enable_rate_limiting = env::var("ENABLE_RATE_LIMITING")
-        .unwrap_or_else(|_| args.enable_rate_limiting.to_string())
-        .parse::<bool>()
-        .expect("Failed to parse ENABLE_RATE_LIMITING");
-    let rate_limiting_redis_connection_string = env::var("RATE_LIMITING_REDIS_CONNECTION_STRING")
-        .ok()
-        .unwrap_or(args.rate_limiting_redis_connection_string.to_string());
-    let rate_limiting_redis_pool_size = env::var("RATE_LIMITING_REDIS_POOL_SIZE")
-        .ok()
-        .unwrap_or(args.rate_limiting_redis_pool_size.to_string())
-        .parse::<usize>()
-        .expect("Failed to parse RATE_LIMITING_REDIS_POOL_SIZE");
-    let rate_limiting_window_duration_size_min = env::var("RATE_LIMITING_WINDOW_DURATION_SIZE_MIN")
-        .ok()
-        .unwrap_or(args.rate_limiting_window_duration_size_min.to_string())
-        .parse::<u64>()
-        .expect("Failed to parse RATE_LIMITING_WINDOW_DURATION_SIZE_MIN");
-    let rate_limiting_max_prompt_tokens = env::var("RATE_LIMITING_MAX_PROMPT_TOKENS")
-        .ok()
-        .unwrap_or(args.rate_limiting_max_prompt_tokens.to_string())
-        .parse::<u64>()
-        .expect("Failed to parse RATE_LIMITING_MAX_PROMPT_TOKENS");
-    let rate_limiting_user_header_key = env::var("RATE_LIMITING_USER_HEADER_KEY")
-        .ok()
-        .unwrap_or(args.rate_limiting_user_header_key.to_string());
+    let openai_tls = args.openai_tls;
+    let openai_port = args.openai_port;
+    let openai_domain = args.openai_domain;
+    let http_proxy_port = args.http_proxy_port;
+    let http_proxy_metrics_port = args.http_proxy_metrics_port;
+    let enable_rate_limiting = args.enable_rate_limiting;
+    let rate_limiting_redis_connection_string = args.rate_limiting_redis_connection_string;
+    let rate_limiting_redis_pool_size = args.rate_limiting_redis_pool_size;
+    let rate_limiting_window_duration_size_min = args.rate_limiting_window_duration_size_min;
+    let rate_limiting_max_prompt_tokens = args.rate_limiting_max_prompt_tokens;
+    let rate_limiting_user_header_key = args.rate_limiting_user_header_key;
 
     env_logger::init();
 
@@ -132,7 +112,7 @@ fn main() {
                 rate_limiting_user_header_key: rate_limiting_user_header_key.leak(),
             },
         })
-        .expect("Failed to create http gateway"),
+            .expect("Failed to create http gateway"),
     );
 
     http_proxy.add_tcp(format!("0.0.0.0:{}", http_proxy_port).as_str());
