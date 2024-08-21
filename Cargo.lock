@@ -1279,6 +1279,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "genai-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "clap 4.5.15",
+ "deadpool",
+ "env_logger",
+ "httpmock",
+ "log",
+ "matchers",
+ "mockall",
+ "pingora",
+ "pingora-core",
+ "pingora-error",
+ "pingora-http",
+ "prometheus",
+ "rand 0.7.3",
+ "redis",
+ "reqwest 0.12.5",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "testcontainers",
+ "tiktoken-rs",
+ "time",
+ "tokio",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2548,37 +2579,6 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "thread_local",
- "tokio",
-]
-
-[[package]]
-name = "pingora-token-counter"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "clap 4.5.15",
- "deadpool",
- "env_logger",
- "httpmock",
- "log",
- "matchers",
- "mockall",
- "pingora",
- "pingora-core",
- "pingora-error",
- "pingora-http",
- "prometheus",
- "rand 0.7.3",
- "redis",
- "reqwest 0.12.5",
- "serde",
- "serde_json",
- "serde_yaml",
- "testcontainers",
- "tiktoken-rs",
- "time",
  "tokio",
 ]
 

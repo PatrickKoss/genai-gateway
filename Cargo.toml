@@ -1,5 +1,5 @@
 [package]
-name = "pingora-token-counter"
+name = "genai-gateway"
 version = "0.1.0"
 edition = "2021"
 
