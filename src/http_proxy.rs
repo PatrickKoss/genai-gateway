@@ -11,8 +11,8 @@ use pingora_error::Error;
 use pingora_error::ErrorType::HTTPStatus;
 use pingora_http::{RequestHeader, ResponseHeader};
 use prometheus::{register_counter_vec, register_int_counter, CounterVec, IntCounter};
-use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::de::{DeserializeOwned, SeqAccess, Visitor};
+use serde::{de, Deserialize, Deserializer};
 use serde_json::from_slice;
 use tiktoken_rs::CoreBPE;
 
@@ -117,6 +117,43 @@ struct CompletionRequestBody {
     model: String,
     #[serde(default = "default_false")]
     stream: bool,
+    #[serde(deserialize_with = "deserialize_prompt")]
+    prompt: Vec<String>,
+}
+
+fn deserialize_prompt<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+{
+    struct StringOrVec;
+
+    impl<'de> Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or an array of strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+        {
+            Ok(vec![value.to_string()])
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+        {
+            let mut vec = Vec::new();
+            while let Some(value) = seq.next_element()? {
+                vec.push(value);
+            }
+            Ok(vec)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
 }
 
 #[derive(Deserialize, Debug)]
@@ -520,13 +557,29 @@ impl<R: SlidingWindowRateLimiter + Send + Sync> HttpGateway<R> {
             from_slice::<CompletionRequestBody>(&ctx.buffer.req_buffer)
                 .map_err(|_| Error::explain(HTTPStatus(400), "invalid request body"))
                 .and_then(|json_body| {
+                    let is_stream_request = json_body.stream;
+
+                    let prompt_tokens = if is_stream_request {
+                        json_body
+                            .prompt
+                            .iter()
+                            .map(|message| {
+                                self.tokenizer
+                                    .encode_with_special_tokens(message.as_str())
+                                    .len()
+                            })
+                            .sum()
+                    } else {
+                        0
+                    };
+
                     self.create_openai_request(
                         ctx,
                         json_body.model,
                         false,
                         json_body.stream,
                         !json_body.stream,
-                        0,
+                        prompt_tokens,
                     )
                 })?;
         }
@@ -867,6 +920,42 @@ mod tests {
         let res = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{}/v1/completions", http_proxy_server_port).as_str())
             .body(json!({"model": "gpt-3.5-turbo", "prompt": "test"}).to_string())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = res.bytes().await.expect("Failed to read response body");
+        let json: Value = serde_json::from_slice(&bytes).expect("Failed to parse JSON");
+
+        assert!(json.get("usage").is_some());
+        let data = json.get("usage").unwrap().as_object().unwrap();
+        assert_eq!(data.get("prompt_tokens").unwrap().as_i64(), Some(20i64));
+        assert_eq!(data.get("completion_tokens").unwrap().as_i64(), Some(10i64));
+    }
+
+    #[tokio::test]
+    async fn test_post_completion_prompt_array() {
+        let mock_server = MockServer::start();
+        mock_server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::POST).path("/v1/completions");
+                then.status(200).json_body(json!(
+                    {
+                        "usage": {
+                            "prompt_tokens": 20,
+                            "completion_tokens": 10,
+                        },
+                    }
+                ));
+            })
+            .await;
+
+        let http_proxy_server_port = start_http_proxy_server(mock_server.port()).await;
+        let res = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/completions", http_proxy_server_port).as_str())
+            .body(json!({"model": "gpt-3.5-turbo", "prompt": ["test"]}).to_string())
             .send()
             .await
             .expect("Failed to send request");
